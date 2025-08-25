@@ -149,86 +149,119 @@ class FPLOVisualizer:
         self._assign_colors()
         
     def _parse_orbital_labels(self, orbital_text):
-        """解析轨道标签 - 处理元素名后有空格的格式"""
+        """解析轨道标签（通用：元素 + nℓ），并在失败时回退到（元素 + ℓ）
+
+        设计说明：
+        - 解析如 "Cs (001)5p1/2-1/2" 或 "Cs(001)5p1/2-1/2" 等标签。
+        - 提取 element, n, ℓ（s/p/d/f），忽略原子编号与自旋分裂 j、m_j。
+        - 生成键："元素_nℓ"（示例："Cs_5p"），并将所有自旋分量合并到该组。
+        - 若无法提取 n，仅提取 ℓ，回退为 "元素_ℓ"（示例："Cs_p"），并打印警告。
+
+        兼容性：
+        - 绘图代码通过遍历 self.orbital_info 的键工作，故直接兼容新的键格式。
+        - self.orbital_types 改为存储出现的 "nℓ" 或回退时的 "ℓ" 字符串，用于颜色分配与图例。
+        """
+
         orbital_parts = orbital_text.split()
 
         # 跳过前两列 (k点和能量标签)
         if len(orbital_parts) >= 2:
-            # 检查是否是标准的k点和能量标签
             if orbital_parts[0] in ['#', 'ik'] or 'e(k' in orbital_parts[1]:
                 print(f"跳过前两列标签: {orbital_parts[0]} {orbital_parts[1]}")
                 orbital_parts = orbital_parts[2:]  # 从第三列开始
 
         print(f"解析轨道标签: {len(orbital_parts)} 个部分")
 
+        # 解析游标：轨道列索引递增，用于映射到权重列
         orbital_index = 0
         i = 0
 
+        # 统一的正则模板
+        # 1) 紧凑格式："Cs(001)5p1/2-1/2"，捕获 element, n, l
+        compact_pat = re.compile(r'^([A-Z][a-z]?)\(\d+\)(\d+)([spdf])')
+        # 2) 分隔格式：element 与轨道信息分开："Cs" + "(001)5p1/2-1/2"
+        split_pat = re.compile(r'^\(\d+\)(\d+)([spdf])')
+        # 3) 仅能拿到 ℓ 的回退：从包含 n 失败时尝试仅提取 ℓ
+        l_only_compact_pat = re.compile(r'^([A-Z][a-z]?)\(\d+\).*?([spdf])')
+        l_only_split_pat = re.compile(r'^\(\d+\).*?([spdf])')
+
         while i < len(orbital_parts):
-            current_part = orbital_parts[i]
+            current = orbital_parts[i]
 
-            # 检查当前部分是否是元素名（单字母或双字母）
-            element_match = re.match(r'^([A-Z][a-z]?)$', current_part)
+            # 情况A：紧凑写法（元素与轨道在同一token）
+            m = compact_pat.match(current)
+            if m:
+                element, n, l_letter = m.group(1), m.group(2), m.group(3)
+                key_suffix = f"{n}{l_letter}"
+                orbital_key = f"{element}_{key_suffix}"
 
+                self.elements.add(element)
+                self.orbital_types.add(key_suffix)
+                if orbital_key not in self.orbital_info:
+                    self.orbital_info[orbital_key] = []
+                self.orbital_info[orbital_key].append(orbital_index)
+
+                orbital_index += 1
+                i += 1
+                continue
+
+            # 情况B：拆分写法（当前是元素名，下一token是轨道信息）
+            element_match = re.match(r'^([A-Z][a-z]?)$', current)
             if element_match and i + 1 < len(orbital_parts):
                 element = element_match.group(1)
-                next_part = orbital_parts[i + 1]
+                next_token = orbital_parts[i + 1]
 
-                # 检查下一部分是否是轨道信息 (数字)轨道字母+量子数
-                orbital_match = re.search(r'\((\d+)\)(\d*)([spdf])(\d+/\d+[+-]\d+/\d+)', next_part)
-
-                if orbital_match:
-                    orbital_type = orbital_match.group(3)
+                m2 = split_pat.match(next_token)
+                if m2:
+                    n, l_letter = m2.group(1), m2.group(2)
+                    key_suffix = f"{n}{l_letter}"
+                    orbital_key = f"{element}_{key_suffix}"
 
                     self.elements.add(element)
-                    self.orbital_types.add(orbital_type)
-
-                    orbital_key = f"{element}_{orbital_type}"
+                    self.orbital_types.add(key_suffix)
                     if orbital_key not in self.orbital_info:
                         self.orbital_info[orbital_key] = []
-
                     self.orbital_info[orbital_key].append(orbital_index)
+
                     orbital_index += 1
-
-                    # 调试信息 (可选，生产环境可注释掉)
-                    # print(f"    解析: {element} {next_part} → 元素: {element}, 轨道: {orbital_type}")
-
-                    i += 2  # 跳过已处理的两个部分
+                    i += 2
                     continue
-                else:
-                    print(f"    警告: 元素 {element} 后的轨道信息格式不正确: {next_part}")
 
-            # 如果不是元素+轨道的组合，检查是否是连在一起的格式
-            elif '(' in current_part and ')' in current_part:
-                # 处理没有空格分隔的格式，如 "V(004)4p3/2-3/2"
-                element_match = re.search(r'^([A-Z][a-z]?)\(', current_part)
-                if element_match:
-                    element = element_match.group(1)
+                # [Deprecated 回退路径] 当无法提取 n，仅提取 ℓ，退回到 元素_ℓ
+                m2_fallback = l_only_split_pat.match(next_token)
+                if m2_fallback:
+                    l_letter = m2_fallback.group(1)
+                    orbital_key = f"{element}_{l_letter}"
+                    self.elements.add(element)
+                    self.orbital_types.add(l_letter)
+                    if orbital_key not in self.orbital_info:
+                        self.orbital_info[orbital_key] = []
+                    self.orbital_info[orbital_key].append(orbital_index)
+                    print(f"    警告: {element} 无法解析主量子数n，回退为 '{orbital_key}'")
 
-                    orbital_match = re.search(r'\)(\d*)([spdf])\d+/\d+[+-]\d+/\d+', current_part)
-                    if orbital_match:
-                        orbital_type = orbital_match.group(2)
+                    orbital_index += 1
+                    i += 2
+                    continue
 
-                        self.elements.add(element)
-                        self.orbital_types.add(orbital_type)
+            # 情况C：其它未知写法，尝试仅提取元素与 ℓ 的回退
+            m3 = l_only_compact_pat.match(current)
+            if m3:
+                element, l_letter = m3.group(1), m3.group(2)
+                orbital_key = f"{element}_{l_letter}"
+                self.elements.add(element)
+                self.orbital_types.add(l_letter)
+                if orbital_key not in self.orbital_info:
+                    self.orbital_info[orbital_key] = []
+                self.orbital_info[orbital_key].append(orbital_index)
+                print(f"    警告: {current} 无法解析主量子数n，回退为 '{orbital_key}'")
 
-                        orbital_key = f"{element}_{orbital_type}"
-                        if orbital_key not in self.orbital_info:
-                            self.orbital_info[orbital_key] = []
+                orbital_index += 1
+                i += 1
+                continue
 
-                        self.orbital_info[orbital_key].append(orbital_index)
-                        orbital_index += 1
-
-                        # print(f"    解析: {current_part} → 元素: {element}, 轨道: {orbital_type}")
-                    else:
-                        print(f"    警告: 无法解析轨道类型: {current_part}")
-                else:
-                    print(f"    警告: 无法解析元素: {current_part}")
-            else:
-                # 跳过不符合格式的部分
-                if current_part.strip():
-                    print(f"    跳过: {current_part} (格式不符)")
-
+            # 无法识别的token，跳过
+            if current.strip():
+                print(f"    跳过: {current} (格式不符)")
             i += 1
                         
     def _assign_colors(self):

@@ -52,6 +52,7 @@ except Exception as e:
 
 import numpy as np
 import re
+import colorsys
 from matplotlib.patches import Rectangle
 from matplotlib.text import Text
 
@@ -453,6 +454,132 @@ class InteractivePlotWidget(QWidget):
             for i, orbital_key in enumerate(sorted(self.visualizer.orbital_info.keys())):
                 color = monochrome_colors[i % len(monochrome_colors)]
                 self.visualizer.orbital_colors[orbital_key] = color
+
+        # 说明：针对“元素+nℓ”键，按ℓ（s/p/d/f）分桶，对每个ℓ下的n进行全局轮换，使用高对比度调色板
+        # 仅当选择学术/多彩方案时，重建颜色以提高区分度
+        try:
+            scheme = self.plot_settings.get('color_scheme', 'academic')
+            if scheme in ('academic', 'colorful') and hasattr(self.visualizer, 'orbital_info'):
+                # 高对比度基色（matplotlib/tab10风格），在每个ℓ内轮换
+                high_contrast_palette = [
+                    '#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd',
+                    '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'
+                ]
+
+                # 收集每个ℓ下的所有n（全局），用于稳定轮换
+                l_to_ns = {l: [] for l in ['s', 'p', 'd', 'f']}
+                for orbital_key in self.visualizer.orbital_info.keys():
+                    # 提取类型部分：nℓ 或 仅ℓ
+                    if '_' in orbital_key:
+                        type_part = orbital_key.split('_', 1)[1]
+                    else:
+                        type_part = orbital_key
+
+                    # 末尾字母若为spdf则为ℓ
+                    l_letter = type_part[-1] if type_part and type_part[-1] in 'spdf' else None
+                    if l_letter not in l_to_ns:
+                        continue
+                    n_part = type_part[:-1] if l_letter and len(type_part) > 1 else ''
+                    # 统一保存为字符串，空表示无n
+                    if n_part not in l_to_ns[l_letter]:
+                        l_to_ns[l_letter].append(n_part)
+
+                # 对每个ℓ的n集合进行排序（数值优先，其次字典序），确保全局一致
+                for l in l_to_ns:
+                    def n_key(n):
+                        try:
+                            return (0, int(n))
+                        except:
+                            return (1, n)
+                    l_to_ns[l].sort(key=n_key)
+
+                # [Fix 20250825] 使用固定30色方案：元素→色系哈希/手动映射；元素内按 ℓ→n 循环取色
+                # 6 个色系，每系 5 个颜色（均不含 light/dark 关键词）
+                family_palette = {
+                    'red':    ['#FF0000', '#B22222', '#DC143C', '#FF6347', '#FF4500'],
+                    'orange': ['#FFA500', '#FFD700', '#DAA520', '#FFFF00', '#F0E68C'],
+                    'green':  ['#008000', '#00FF00', '#7CFC00', '#7FFF00', '#9ACD32'],
+                    'cyan':   ['#00FFFF', '#40E0D0', '#7FFFD4', '#48D1CC', '#5F9EA0'],
+                    'blue':   ['#0000FF', '#4169E1', '#6495ED', '#1E90FF', '#00BFFF'],
+                    'violet': ['#800080', '#EE82EE', '#FF00FF', '#8A2BE2', '#DA70D6'],
+                }
+                family_order = ['red', 'orange', 'green', 'cyan', 'blue', 'violet']
+
+                # 手动覆盖映射（优先于哈希；可按需扩展/外部配置）
+                # [Preset 20250825] 常见元素的色系归类
+                manual_family = {
+                    # red
+                    'O': 'red', 'Br': 'red',
+                    # orange（黄/橙系）
+                    'S': 'orange', 'P': 'orange', 'Si': 'orange', 'B': 'orange',
+                    'Al': 'orange', 'Fe': 'orange', 'Cu': 'orange', 'Au': 'orange',
+                    # green（卤素/碱土/部分过渡金属）
+                    'F': 'green', 'Cl': 'green', 'Be': 'green', 'Mg': 'green',
+                    'Ca': 'green', 'Cr': 'green', 'V': 'green', 'Ni': 'green',
+                    # cyan（H/C 及若干金属）
+                    'H': 'cyan', 'C': 'cyan', 'Zn': 'cyan', 'Mo': 'cyan',
+                    'W': 'cyan', 'Se': 'cyan',
+                    # blue（N/稀有气体/部分金属）
+                    'N': 'blue', 'He': 'blue', 'Ne': 'blue', 'Ar': 'blue',
+                    'Kr': 'blue', 'Xe': 'blue', 'Ti': 'blue', 'Co': 'blue',
+                    'Ag': 'blue', 'Pt': 'blue',
+                    # violet（碱金属/碱土及部分）
+                    'Li': 'violet', 'Na': 'violet', 'K': 'violet', 'Rb': 'violet',
+                    'Cs': 'violet', 'Ba': 'violet', 'Mn': 'violet', 'I': 'violet',
+                }
+
+                def element_to_family(element):
+                    # 手动映射优先
+                    fam = manual_family.get(element)
+                    if fam in family_palette:
+                        return fam
+                    # 稳定哈希：按字符编码求和对 6 取模
+                    idx = sum(ord(c) for c in element) % len(family_order)
+                    return family_order[idx]
+
+                # 解析 type_part，返回排序键 (ℓ优先级, n, 原串)
+                def parse_type(type_part):
+                    l_letter = type_part[-1] if (type_part and type_part[-1] in ['s', 'p', 'd', 'f']) else ''
+                    n_part = type_part[:-1] if (len(type_part) > 1 and l_letter) else ''
+                    try:
+                        n_val = int(n_part) if n_part != '' else -1
+                    except Exception:
+                        n_val = 10**9
+                    l_priority = {'s': 0, 'p': 1, 'd': 2, 'f': 3}.get(l_letter, 999)
+                    return (l_priority, n_val, type_part)
+
+                # 构建：元素 -> 其所有 type_part 集合
+                element_types = {}
+                for ok in self.visualizer.orbital_info.keys():
+                    if '_' in ok:
+                        element, type_part = ok.split('_', 1)
+                    else:
+                        element, type_part = ok, ok
+                    element_types.setdefault(element, set()).add(type_part)
+
+                # 为每个元素分配其色系，并按 ℓ→n 排序循环上色
+                type_color_map = {}
+                for element, type_set in element_types.items():
+                    family = element_to_family(element)
+                    palette = family_palette[family]
+                    sorted_types = sorted(type_set, key=lambda t: parse_type(t))
+                    for i, t in enumerate(sorted_types):
+                        type_color_map[(element, t)] = palette[i % len(palette)]
+
+                # 回填到每个 orbital_key
+                new_colors = {}
+                for ok in sorted(self.visualizer.orbital_info.keys()):
+                    if '_' in ok:
+                        element, type_part = ok.split('_', 1)
+                    else:
+                        element, type_part = ok, ok
+                    color = type_color_map.get((element, type_part), '#95A5A6')
+                    new_colors[ok] = color
+
+                # 覆盖颜色
+                self.visualizer.orbital_colors.update(new_colors)
+        except Exception as e:
+            print(f"高对比度颜色重分配失败，沿用原方案: {e}")
 
         # 显示前几个轨道的颜色分配
         orbital_keys = list(self.visualizer.orbital_colors.keys())[:5]
@@ -1089,9 +1216,25 @@ class InteractivePlotWidget(QWidget):
                 if orbital_key.startswith(element + '_'):
                     element_orbitals.append(orbital_key)
 
-            # 按轨道类型排序
-            element_orbitals.sort(key=lambda x: orbital_order.index(x.split('_')[1])
-                                 if x.split('_')[1] in orbital_order else 999)
+            # [Fix 20250825] 图例元素内排序：按 ℓ(s<p<d<f) → n 升序 → 原串
+            def legend_sort_key(orbital_key):
+                # 提取类型部分（可能是 nℓ 或仅 ℓ）
+                type_part = orbital_key.split('_', 1)[1] if '_' in orbital_key else orbital_key
+
+                # 提取 ℓ 字母（最后一位在 spdf）
+                l_letter = type_part[-1] if (type_part and type_part[-1] in ['s', 'p', 'd', 'f']) else ''
+
+                # 提取 n（去掉最后一位的数字部分），无 n 时用 -1 提前显示
+                n_part = type_part[:-1] if (len(type_part) > 1 and l_letter) else ''
+                try:
+                    n_val = int(n_part) if n_part != '' else -1
+                except Exception:
+                    n_val = 10**9  # 非法 n 放到最后
+
+                l_priority = {'s': 0, 'p': 1, 'd': 2, 'f': 3}.get(l_letter, 999)
+                return (l_priority, n_val, type_part)
+
+            element_orbitals.sort(key=legend_sort_key)
 
             for orbital_key in element_orbitals:
                 if self.visible_orbitals.get(orbital_key, True):
@@ -2261,24 +2404,34 @@ class ControlPanel(QWidget):
         # 清空字典
         self.orbital_checkboxes.clear()
 
-        # 强制处理事件和更新布局
+        # 强制处理事件并再次检查
         QApplication.processEvents()
         self.orbital_content_widget.updateGeometry()
         self.orbital_content_layout.update()
 
     def get_orbital_sort_key(self, orbital_key):
         """获取轨道排序键"""
+        # 规则：元素 → ℓ优先级(s<p<d<f) → 主量子数n升序 → 原串
         try:
             if '_' in orbital_key:
-                element, orbital_type = orbital_key.split('_', 1)
-                # 轨道类型排序优先级
-                orbital_order = {'s': 0, 'p': 1, 'd': 2, 'f': 3}
-                type_priority = orbital_order.get(orbital_type, 999)
-                return (element, type_priority, orbital_type)
+                element, type_part = orbital_key.split('_', 1)
             else:
-                return (orbital_key, 999, '')
-        except:
-            return (orbital_key, 999, '')
+                element, type_part = orbital_key, orbital_key
+
+            # 提取 ℓ 字母
+            l_letter = type_part[-1] if (type_part and type_part[-1] in ['s', 'p', 'd', 'f']) else ''
+
+            # 提取 n（去掉最后一个 ℓ 字母后的数字部分）
+            n_part = type_part[:-1] if (len(type_part) > 1 and l_letter) else ''
+            try:
+                n_val = int(n_part) if n_part != '' else -1
+            except Exception:
+                n_val = 10**9  # 非法 n 放末尾
+
+            l_priority = {'s': 0, 'p': 1, 'd': 2, 'f': 3}.get(l_letter, 999)
+            return (element, l_priority, n_val, type_part)
+        except Exception:
+            return (orbital_key, 999, 10**9, orbital_key)
 
     def create_orbital_checkbox(self, orbital_key):
         """创建单个轨道复选框"""
