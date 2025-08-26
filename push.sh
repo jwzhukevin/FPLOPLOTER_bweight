@@ -4,6 +4,9 @@
 # 功能：语法检查 -> 虚拟环境激活 -> requirements.txt更新 -> 版本标记 -> 提交推送
 # 使用方法：./push.sh
 
+# 全局变量初始化
+CURRENT_VERSION_TAG=""
+
 # 设置颜色输出
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -163,9 +166,81 @@ update_requirements() {
     fi
 }
 
+# 读取版本历史记录函数
+read_version_history() {
+    local history_file="version_history"
+    if [ -f "$history_file" ]; then
+        cat "$history_file"
+    fi
+}
+
+# 显示历史记录函数
+show_version_history() {
+    print_step "查看提交历史记录..."
+    
+    local history_content=$(read_version_history)
+    if [ -z "$history_content" ]; then
+        print_info "暂无历史记录"
+        return
+    fi
+    
+    print_info "最近10次提交记录："
+    echo -e "${CYAN}----------------------------------------${NC}"
+    echo "$history_content" | tail -n 10 | while IFS='|' read -r timestamp version_tag commit_msg; do
+        if [ -n "$timestamp" ]; then
+            echo -e "${YELLOW}时间:${NC} $timestamp"
+            if [ -n "$version_tag" ] && [ "$version_tag" != "无" ]; then
+                echo -e "${GREEN}版本:${NC} $version_tag"
+            fi
+            echo -e "${BLUE}信息:${NC} $commit_msg"
+            echo -e "${CYAN}----------------------------------------${NC}"
+        fi
+    done
+}
+
+# 保存版本历史记录函数
+save_version_history() {
+    local version_tag="$1"
+    local commit_message="$2"
+    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+    local history_file="version_history"
+    
+    # 如果版本标识为空，设置为"无"
+    if [ -z "$version_tag" ]; then
+        version_tag="无"
+    fi
+    
+    # 保存记录格式：时间戳|版本标识|提交信息
+    echo "$timestamp|$version_tag|$commit_message" >> "$history_file"
+    
+    # 只保留最近50条记录，避免文件过大
+    if [ -f "$history_file" ]; then
+        tail -n 50 "$history_file" > "${history_file}.tmp"
+        mv "${history_file}.tmp" "$history_file"
+    fi
+    
+    print_info "历史记录已保存"
+}
+
 # 获取用户版本标识函数
 get_version_tag() {
     print_step "版本标识设置..."
+    
+    # 显示历史记录
+    show_version_history
+    
+    # 读取上次的版本标识
+    local last_version=""
+    if [ -f ".last_version" ]; then
+        last_version=$(cat .last_version 2>/dev/null | tr -d '\n\r')
+    fi
+    
+    # 显示上次版本信息
+    if [ -n "$last_version" ]; then
+        print_info "上次版本标识: $last_version"
+    else
+        print_info "这是首次设置版本标识"
+    fi
     
     echo -e "${CYAN}请选择操作：${NC}"
     echo "1) 输入版本标识（如：v1.2.3, release-2024, hotfix-001）"
@@ -180,18 +255,26 @@ get_version_tag() {
             read -r version_tag
             if [ -n "$version_tag" ]; then
                 print_success "版本标识设置为: $version_tag"
+                # 保存当前版本标识到项目文件
                 echo "$version_tag" > .version_tag
                 git add .version_tag
+                # 保存到历史记录文件（用于下次提示）
+                echo "$version_tag" > .last_version
+                # 将版本标识存储到全局变量，供后续保存历史记录使用
+                CURRENT_VERSION_TAG="$version_tag"
                 return 0
             else
                 print_warning "版本标识为空，跳过设置"
+                CURRENT_VERSION_TAG=""
             fi
             ;;
         2)
             print_info "跳过版本标识设置"
+            CURRENT_VERSION_TAG=""
             ;;
         *)
             print_warning "无效选择，跳过版本标识设置"
+            CURRENT_VERSION_TAG=""
             ;;
     esac
 }
@@ -231,6 +314,15 @@ commit_and_push() {
     print_info "提交变化..."
     if git commit -m "$commit_message"; then
         print_success "提交成功: $commit_message"
+        
+        # 保存历史记录
+        save_version_history "$CURRENT_VERSION_TAG" "$commit_message"
+        
+        # 将历史记录文件添加到 Git（如果有更新）
+        if [ -f "version_history" ]; then
+            git add version_history
+            git commit -m "更新版本历史记录" --quiet || true
+        fi
     else
         handle_error "提交失败"
     fi
