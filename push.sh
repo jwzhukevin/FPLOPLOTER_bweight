@@ -315,6 +315,17 @@ commit_and_push() {
     if git commit -m "$commit_message"; then
         print_success "提交成功: $commit_message"
         
+        # 读取当前版本标识（如果存在 .version_tag 文件）
+        local current_version=""
+        if [ -f ".version_tag" ]; then
+            current_version=$(cat .version_tag 2>/dev/null | tr -d '\n\r')
+        fi
+        
+        # 如果全局变量为空，使用文件中的版本标识
+        if [ -z "$CURRENT_VERSION_TAG" ] && [ -n "$current_version" ]; then
+            CURRENT_VERSION_TAG="$current_version"
+        fi
+        
         # 保存历史记录
         save_version_history "$CURRENT_VERSION_TAG" "$commit_message"
         
