@@ -200,6 +200,11 @@ get_version_tag() {
 commit_and_push() {
     print_step "准备 Git 提交..."
     
+    # 清理已跟踪但应被忽略的文件
+    print_info "清理缓存文件..."
+    git rm -r --cached __pycache__/ 2>/dev/null || true
+    git rm -r --cached FPLP/ 2>/dev/null || true
+    
     # 检查是否有变化
     if git diff --quiet && git diff --cached --quiet; then
         print_warning "没有检测到文件变化，无需提交"
@@ -210,7 +215,7 @@ commit_and_push() {
     print_info "检测到以下文件变化："
     git status --porcelain
     
-    # 添加所有变化的文件
+    # 添加所有变化的文件（排除忽略的文件）
     print_info "添加所有变化的文件..."
     git add .
     
@@ -266,12 +271,6 @@ main() {
     
     echo "=================================="
     print_success "Git 同步推送流程完成！"
-    
-    # 退出虚拟环境
-    if [ -n "$VIRTUAL_ENV" ]; then
-        deactivate
-        print_info "已退出虚拟环境"
-    fi
 }
 
 # 脚本入口点
