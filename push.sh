@@ -257,11 +257,13 @@ get_version_tag() {
                 print_success "版本标识设置为: $version_tag"
                 # 保存当前版本标识到项目文件
                 echo "$version_tag" > .version_tag
+                print_info "版本标识已保存到 .version_tag 文件"
                 git add .version_tag
                 # 保存到历史记录文件（用于下次提示）
                 echo "$version_tag" > .last_version
                 # 将版本标识存储到全局变量，供后续保存历史记录使用
                 CURRENT_VERSION_TAG="$version_tag"
+                print_info "全局变量 CURRENT_VERSION_TAG 设置为: $CURRENT_VERSION_TAG"
                 return 0
             else
                 print_warning "版本标识为空，跳过设置"
@@ -287,6 +289,7 @@ commit_and_push() {
     print_info "清理缓存文件..."
     git rm -r --cached __pycache__/ 2>/dev/null || true
     git rm -r --cached FPLP/ 2>/dev/null || true
+    git rm --cached .last_version 2>/dev/null || true
     
     # 检查是否有变化
     if git diff --quiet && git diff --cached --quiet; then
@@ -327,6 +330,7 @@ commit_and_push() {
         fi
         
         # 保存历史记录
+        print_info "准备保存历史记录，当前版本标识: '$CURRENT_VERSION_TAG'"
         save_version_history "$CURRENT_VERSION_TAG" "$commit_message"
         
         # 将历史记录文件添加到 Git（如果有更新）
