@@ -1,5 +1,6 @@
 # 用户特定忽略文件
 +bweights/
+FPLP/
 
 # Python 相关忽略文件
 __pycache__/
