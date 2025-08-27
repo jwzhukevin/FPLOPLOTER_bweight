@@ -1600,6 +1600,15 @@ class ControlPanel(QWidget):
         self.elements = set()
         self.orbital_types = set()
         self.font_size = 12  # 默认字体大小
+        
+        # 初始化绘图设置
+        self.plot_settings = {
+            'fermi_window': [-5.0, 5.0],  # 默认费米窗口
+            'fermi_energy': 0.0,
+            'show_fermi_line': True,
+            'color_scheme': 'academic'
+        }
+        
         self.init_ui()
 
     def init_ui(self):
@@ -1704,7 +1713,7 @@ class ControlPanel(QWidget):
         settings_tabs = QTabWidget()
 
         # 费米线设置标签页
-        fermi_tab = QWidget()
+        self.fermi_tab = QWidget()
         fermi_layout = QGridLayout()
 
         # 费米能级调整
@@ -1779,7 +1788,7 @@ class ControlPanel(QWidget):
 
         fermi_layout.addLayout(fermi_window_layout, 6, 1, 1, 2)
 
-        fermi_tab.setLayout(fermi_layout)
+        self.fermi_tab.setLayout(fermi_layout)
 
         # ===== 能带设置标签页 =====
         band_tab = QWidget()
@@ -2233,7 +2242,7 @@ class ControlPanel(QWidget):
         # 删除重复的轨道显示控制标签页，使用现有的轨道显示控制模块
 
         # 添加所有标签页
-        settings_tabs.addTab(fermi_tab, "费米线")
+        settings_tabs.addTab(self.fermi_tab, "费米线")
         settings_tabs.addTab(band_tab, "能带")
         settings_tabs.addTab(orbital_tab, "轨道")
         settings_tabs.addTab(performance_tab, "性能")
