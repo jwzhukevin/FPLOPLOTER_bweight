@@ -4,20 +4,19 @@
 FPLO能带权重可视化GUI主程序
 
 === 文件结构导航 ===
-1. 导入和配置 (行 1-60)
-2. 工具类 (行 61-228)
-   - PlotCache: 绘图缓存管理器
+1. 导入和配置
+2. 工具类（已迁移至 gui/）
    - MultiCoreProcessor: 多核处理器
    - DataLoaderThread: 数据加载线程
-3. 绘图组件 (行 229-1552)
+3. 绘图组件
    - InteractivePlotWidget: 交互式绘图组件
-4. 控制面板 (行 1553-2952)
+4. 控制面板
    - ControlPanel: 主要的设置控制面板
-5. 日志组件 (行 2953-3003)
+5. 日志组件（已迁移至 gui/）
    - LogWidget: 日志显示组件
-6. 主窗口 (行 3004-3893)
+6. 主窗口（已迁移至 gui/）
    - MainWindow: 应用程序主窗口
-7. 程序入口 (行 3894+)
+7. 程序入口
 """
 
 import sys
@@ -79,179 +78,19 @@ from fplo_fermi_visualizer import FPLOFermiVisualizer
 # 导入性能监控器
 from performance_monitor import PerformanceMonitor
 
+# 引入拆分后的模块
+from gui.tools import MultiCoreProcessor, DataLoaderThread, process_single_orbital
+from gui.log_widget import LogWidget
+
 # ============================================================================
-# 2. 工具类模块
+# 2. 工具类模块（已迁移）
 # ============================================================================
 
-# 移除自定义DraggableLegend类，使用matplotlib内置功能
-# class DraggableLegend:
-#     """可拖动的图例类 - 已替换为matplotlib内置功能"""
-#     pass
-
-class PlotCache:
-    """绘图缓存管理器"""
-
-    def __init__(self, max_size=100):
-        self.cache = {}
-        self.max_size = max_size
-        self.access_order = []
-
-    def _generate_key(self, orbital_key, k_points, energies, weights, settings):
-        """生成缓存键"""
-        # 使用轨道键、数据哈希和设置生成唯一键
-        data_hash = hash((orbital_key,
-                         tuple(k_points[:10]),  # 只使用前10个点生成哈希
-                         tuple(energies[:10]),
-                         tuple(weights[:10]),
-                         str(sorted(settings.items()))))
-        return data_hash
-
-    def get(self, orbital_key, k_points, energies, weights, settings):
-        """获取缓存数据"""
-        key = self._generate_key(orbital_key, k_points, energies, weights, settings)
-        if key in self.cache:
-            # 更新访问顺序
-            self.access_order.remove(key)
-            self.access_order.append(key)
-            return self.cache[key]
-        return None
-
-    def put(self, orbital_key, k_points, energies, weights, settings, plot_data):
-        """存储缓存数据"""
-        key = self._generate_key(orbital_key, k_points, energies, weights, settings)
-
-        # 如果缓存已满，删除最旧的条目
-        if len(self.cache) >= self.max_size:
-            oldest_key = self.access_order.pop(0)
-            del self.cache[oldest_key]
-
-        self.cache[key] = plot_data
-        self.access_order.append(key)
-
-    def clear(self):
-        """清空缓存"""
-        self.cache.clear()
-        self.access_order.clear()
-
-class MultiCoreProcessor:
-    """多核处理器"""
-
-    def __init__(self):
-        self.cpu_count = multiprocessing.cpu_count()
-        print(f"检测到 {self.cpu_count} 个CPU核心")
-
-    def process_orbitals_parallel(self, orbital_data_list, process_func, max_workers=None):
-        """并行处理轨道数据"""
-        if max_workers is None:
-            max_workers = min(self.cpu_count, len(orbital_data_list))
-
-        if max_workers <= 1 or len(orbital_data_list) <= 1:
-            # 单核处理
-            return [process_func(data) for data in orbital_data_list]
-
-        try:
-            from concurrent.futures import ProcessPoolExecutor
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
-                results = list(executor.map(process_func, orbital_data_list))
-            return results
-        except Exception as e:
-            print(f"多核处理失败，回退到单核: {e}")
-            return [process_func(data) for data in orbital_data_list]
-
-def process_single_orbital(orbital_data):
-    """处理单个轨道的函数（用于多核处理）"""
-    orbital_key, k_points, energies, weights, settings = orbital_data
-
-    # 这里实现单个轨道的处理逻辑
-    # 返回处理后的数据
-    weight_threshold = settings.get('weight_threshold', 0.02)
-    max_points = settings.get('max_points_per_orbital', 500)
-
-    # 过滤显著权重
-    mask = weights > weight_threshold
-    if not np.any(mask):
-        return None
-
-    k_filtered = k_points[mask]
-    e_filtered = energies[mask]
-    w_filtered = weights[mask]
-
-    # 数据采样
-    if len(k_filtered) > max_points:
-        sample_indices = np.argsort(w_filtered)[-max_points:]
-        k_filtered = k_filtered[sample_indices]
-        e_filtered = e_filtered[sample_indices]
-        w_filtered = w_filtered[sample_indices]
-
-    return {
-        'orbital_key': orbital_key,
-        'k_points': k_filtered,
-        'energies': e_filtered,
-        'weights': w_filtered
-    }
-
-class DataLoaderThread(QThread):
-    """数据加载线程"""
-    progress = pyqtSignal(int)
-    status = pyqtSignal(str)
-    finished = pyqtSignal(object)
-    error = pyqtSignal(str)
-    
-    def __init__(self, filename):
-        super().__init__()
-        self.filename = filename
-    
-    def run(self):
-        try:
-            self.status.emit("开始读取文件...")
-            self.progress.emit(10)
-            
-            # 这里集成您的数据加载逻辑
-            from fplo_visualizer import FPLOVisualizer
-            
-            self.status.emit("初始化可视化器...")
-            self.progress.emit(10)
-
-            visualizer = FPLOVisualizer(self.filename)
-
-            self.status.emit("分析文件信息...")
-            self.progress.emit(20)
-
-            # 分析文件基本信息
-            visualizer.analyze_file_info()
-
-            self.status.emit("解析头部和轨道信息...")
-            self.progress.emit(40)
-
-            # 解析头部和体系信息（包括轨道标签）
-            visualizer.parse_header_and_system()
-
-            self.status.emit("读取和重组数据...")
-            self.progress.emit(70)
-
-            # 读取数据 - 添加采样以提高性能
-            max_kpoints = 200  # 限制k点数量以提高性能
-            visualizer.read_and_parse_data(max_kpoints=max_kpoints)
-
-            self.status.emit(f"数据采样: 限制到 {max_kpoints} 个k点以提高性能")
-
-            self.status.emit("完成数据处理...")
-            self.progress.emit(90)
-
-            # 输出分析结果
-            elements = sorted(visualizer.elements)
-            orbital_types = sorted(visualizer.orbital_types)
-            self.status.emit(f"检测到 {len(elements)} 种元素: {', '.join(elements)}")
-            self.status.emit(f"检测到 {len(orbital_types)} 种轨道: {', '.join(orbital_types)}")
-            self.status.emit(f"总计 {len(visualizer.orbital_info)} 个轨道组合")
-            
-            self.status.emit("数据加载完成!")
-            self.progress.emit(100)
-            
-            self.finished.emit(visualizer)
-            
-        except Exception as e:
-            self.error.emit(f"数据加载失败: {str(e)}")
+# [Deprecated 20250827] 工具类已迁移至 gui/tools.py：
+# - MultiCoreProcessor
+# - process_single_orbital
+# - DataLoaderThread
+# 这里保留导入（见顶部），以保持外部调用不变。
 
 # ============================================================================
 # 3. 绘图组件模块
@@ -267,8 +106,7 @@ class InteractivePlotWidget(QWidget):
         self.visible_orbitals = {}
         self.visible_elements = {}
 
-        # 初始化缓存和多核处理器
-        self.plot_cache = PlotCache(max_size=50)
+        # 初始化多核处理器（已删除缓存机制，采用全量重绘）
         self.multicore_processor = MultiCoreProcessor()
 
         # 框选放大相关
@@ -338,7 +176,6 @@ class InteractivePlotWidget(QWidget):
             'max_points_per_orbital': 500,  # 每个轨道最大点数（降低）
             'use_fast_rendering': True,     # 使用快速渲染
             'use_multiprocessing': True,    # 使用多核处理
-            'cache_enabled': True,          # 启用缓存机制
 
             # 学术标准颜色方案
             'color_scheme': 'academic'  # academic, colorful, monochrome
@@ -948,27 +785,26 @@ class InteractivePlotWidget(QWidget):
 
         # 检查是否启用多核处理
         use_multiprocessing = self.plot_settings.get('use_multiprocessing', True)
-        cache_enabled = self.plot_settings.get('cache_enabled', True)
 
         total_orbitals = len(self.visualizer.orbital_info)
-        print(f"总轨道数: {total_orbitals}, 多核处理: {use_multiprocessing}, 缓存: {cache_enabled}")
+        print(f"总轨道数: {total_orbitals}, 多核处理: {use_multiprocessing}")
 
         if use_multiprocessing and total_orbitals > 4:
             # 使用多核处理
             self._plot_orbital_weights_multicore(ax, energy_range, weight_threshold,
                                                point_size_factor, point_alpha,
                                                min_point_size, max_point_size,
-                                               max_points_per_orbital, cache_enabled)
+                                               max_points_per_orbital)
         else:
             # 使用单核处理
             self._plot_orbital_weights_singlecore(ax, energy_range, weight_threshold,
                                                 point_size_factor, point_alpha,
                                                 min_point_size, max_point_size,
-                                                max_points_per_orbital, cache_enabled)
+                                                max_points_per_orbital)
 
     def _plot_orbital_weights_multicore(self, ax, energy_range, weight_threshold,
                                       point_size_factor, point_alpha, min_point_size,
-                                      max_point_size, max_points_per_orbital, cache_enabled):
+                                      max_point_size, max_points_per_orbital):
         """多核绘制轨道权重"""
         print("使用多核处理绘制轨道权重...")
 
@@ -1064,11 +900,11 @@ class InteractivePlotWidget(QWidget):
             self._plot_orbital_weights_singlecore(ax, energy_range, weight_threshold,
                                                 point_size_factor, point_alpha,
                                                 min_point_size, max_point_size,
-                                                max_points_per_orbital, cache_enabled)
+                                                max_points_per_orbital)
 
     def _plot_orbital_weights_singlecore(self, ax, energy_range, weight_threshold,
                                        point_size_factor, point_alpha, min_point_size,
-                                       max_point_size, max_points_per_orbital, cache_enabled):
+                                       max_point_size, max_points_per_orbital):
         """单核绘制轨道权重（原有逻辑）"""
         print("使用单核处理绘制轨道权重...")
 
@@ -1333,12 +1169,8 @@ class InteractivePlotWidget(QWidget):
 
     def toggle_orbital_visibility(self, orbital_key, visible):
         """切换轨道可见性"""
-        if orbital_key == "CLEAR_CACHE":
-            # 清除缓存
-            self.plot_cache.clear()
-            print("绘图缓存已清除")
-            return
-        elif orbital_key == "RESET_ZOOM":
+        # [Deprecated 20250827] 旧逻辑：处理 "CLEAR_CACHE" 指令已删除（缓存机制废弃）
+        if orbital_key == "RESET_ZOOM":
             # 重置缩放
             self.reset_zoom()
             return
@@ -1916,14 +1748,7 @@ class ControlPanel(QWidget):
         self.use_multiprocessing.toggled.connect(self.on_orbital_settings_changed)
         right_layout.addWidget(self.use_multiprocessing, 0, 1)
 
-        # 缓存机制 - 参照费米线样式
-        right_layout.addWidget(QLabel("启用缓存:"), 1, 0)
-        self.cache_enabled = QCheckBox()
-        self.cache_enabled.setChecked(True)
-        self.cache_enabled.setToolTip("缓存绘图数据以提高重绘速度")
-        self.cache_enabled.toggled.connect(self.on_orbital_settings_changed)
-        right_layout.addWidget(self.cache_enabled, 1, 1)
-
+        # [Deprecated 20250827] 旧逻辑：缓存机制（cache_enabled 复选框）UI 已移除，采用全量重绘
         # 最大点数/轨道 - 参照费米线样式
         right_layout.addWidget(QLabel("最大点数/轨道:"), 2, 0)
         self.max_points_spin = QSpinBox()
@@ -1935,12 +1760,7 @@ class ControlPanel(QWidget):
         self.max_points_spin.valueChanged.connect(self.on_orbital_settings_changed)
         right_layout.addWidget(self.max_points_spin, 2, 1)
 
-        # 清除缓存按钮 - 参照费米线样式
-        self.clear_cache_btn = QPushButton("清除缓存")
-        self.clear_cache_btn.setToolTip("清除所有缓存数据")
-        self.clear_cache_btn.setMaximumWidth(120)  # 参照费米线区域的按钮宽度
-        self.clear_cache_btn.clicked.connect(self.clear_plot_cache)
-        right_layout.addWidget(self.clear_cache_btn, 5, 0, 1, 2)
+        # [Deprecated 20250827] 旧逻辑：清除缓存按钮已移除
 
         right_group.setLayout(right_layout)
 
@@ -2645,11 +2465,6 @@ class ControlPanel(QWidget):
             checkbox.setChecked(not checkbox.isChecked())
         print("已反选轨道")
 
-    def clear_plot_cache(self):
-        """清除绘图缓存"""
-        # 这个方法会被主窗口连接到绘图组件
-        self.orbital_toggled.emit("CLEAR_CACHE", True)
-
     def reset_zoom(self):
         """重置缩放"""
         # 这个方法会被主窗口连接到绘图组件
@@ -2928,6 +2743,7 @@ class ControlPanel(QWidget):
         self.update_alpha_label()
 
         # 移除颜色方案处理，因为已在顶部导航栏处理
+        # [Deprecated 20250827] 设置中移除了 cache_enabled 字段（缓存机制废弃）
         settings = {
             'point_size_factor': point_size,
             'point_alpha': point_alpha,
@@ -2936,7 +2752,6 @@ class ControlPanel(QWidget):
             'weight_threshold': self.weight_threshold_spin.value(),
             'max_points_per_orbital': self.max_points_spin.value(),
             'use_multiprocessing': self.use_multiprocessing.isChecked(),
-            'cache_enabled': self.cache_enabled.isChecked()
         }
         self.settings_changed.emit(settings)
 
@@ -2997,837 +2812,19 @@ class ControlPanel(QWidget):
 # ============================================================================
 # 5. 日志组件模块
 # ============================================================================
-
-class LogWidget(QTextEdit):
-    """日志显示组件 - 连接到日志管理器"""
-
-    def __init__(self):
-        super().__init__()
-        self.setMaximumHeight(150)
-        self.setFont(QFont("Consolas", 9))
-        self.setReadOnly(True)
-
-        # 连接到日志管理器
-        logger.log_message.connect(self.on_log_message)
-
-        # 显示初始化信息
-        self.append("<span style='color: green;'>[SYSTEM] 日志系统已启动</span>")
-
-    def on_log_message(self, level, message):
-        """处理日志管理器的消息"""
-        import datetime
-        timestamp = datetime.datetime.now().strftime('%H:%M:%S')
-
-        # 根据日志级别设置颜色
-        color_map = {
-            'DEBUG': '#888888',
-            'INFO': '#0066CC',
-            'WARNING': '#FF8800',
-            'ERROR': '#CC0000',
-            'CRITICAL': '#FF0000',
-            'STATUS': '#008800',
-            'USER': '#6600CC',
-            'PERF': '#CC6600',
-            'DATA': '#0088CC'
-        }
-
-        color = color_map.get(level, '#000000')
-        self.append(f"<span style='color: {color};'>[{timestamp}] [{level}] {message}</span>")
-
-        # 自动滚动到底部
-        self.moveCursor(self.textCursor().End)
-
-    def log_info(self, message):
-        """兼容性方法 - 重定向到日志管理器"""
-        log_info(message)
-
-    def log_warning(self, message):
-        """兼容性方法 - 重定向到日志管理器"""
-        log_warning(message)
-
-    def log_error(self, message):
-        """兼容性方法 - 重定向到日志管理器"""
-        log_error(message)
+# [Deprecated 20250827] LogWidget 已迁移至 gui/log_widget.py（已在顶部导入）
+# 为避免命名冲突，这里仅保留一个空的旧类占位符供参考：LegacyLogWidget。
+class LegacyLogWidget(QTextEdit):
+    pass
 
 # ============================================================================
 # 6. 主窗口模块 - 应用程序主界面
 # ============================================================================
-
-class MainWindow(QMainWindow):
-    """主窗口"""
-    
-    def __init__(self):
-        super().__init__()
-
-        # 初始化属性
-        self.current_filename = None  # 当前加载的文件名
-
-        # 性能监控进程管理
-        self.performance_monitor_process = None
-
-        # 连接到日志管理器
-        self.logger = logger
-
-        # 记录程序启动
-        log_status("FPLO可视化工具主窗口初始化")
-
-        self.init_ui()
-
-    def set_window_icon(self):
-        """设置窗口图标"""
-        from PyQt5.QtGui import QIcon
-        import os
-
-        # 图标文件路径列表（按优先级排序）
-        icon_paths = [
-            "icon.png",           # 程序目录下的icon.png
-            "icon.ico",           # 程序目录下的icon.ico
-            "assets/icon.png",    # assets文件夹下的icon.png
-            "assets/icon.ico",    # assets文件夹下的icon.ico
-            "images/icon.png",    # images文件夹下的icon.png
-            "images/icon.ico",    # images文件夹下的icon.ico
-        ]
-
-        # 尝试加载自定义图标
-        for icon_path in icon_paths:
-            if os.path.exists(icon_path):
-                try:
-                    icon = QIcon(icon_path)
-                    if not icon.isNull():
-                        self.setWindowIcon(icon)
-                        print(f"成功加载自定义图标: {icon_path}")
-                        return
-                except Exception as e:
-                    print(f"加载图标失败 {icon_path}: {e}")
-                    continue
-
-        # 如果没有找到自定义图标，创建一个简单的默认图标
-        self.create_default_icon()
-
-    def create_default_icon(self):
-        """创建默认图标"""
-        from PyQt5.QtGui import QIcon, QPixmap, QPainter, QBrush, QColor, QPen, QFont
-        from PyQt5.QtCore import Qt
-
-        try:
-            # 创建32x32的图标
-            pixmap = QPixmap(32, 32)
-            pixmap.fill(Qt.transparent)
-
-            painter = QPainter(pixmap)
-            painter.setRenderHint(QPainter.Antialiasing)
-
-            # 绘制背景圆形
-            painter.setBrush(QBrush(QColor(70, 130, 180)))  # 钢蓝色
-            painter.setPen(QPen(QColor(25, 25, 112), 2))    # 深蓝色边框
-            painter.drawEllipse(2, 2, 28, 28)
-
-            # 绘制文字"F"
-            painter.setPen(QPen(Qt.white))
-            painter.setFont(QFont("Arial", 16, QFont.Bold))
-            painter.drawText(pixmap.rect(), Qt.AlignCenter, "F")
-
-            painter.end()
-
-            # 设置图标
-            icon = QIcon(pixmap)
-            self.setWindowIcon(icon)
-            print("使用默认生成的图标")
-
-        except Exception as e:
-            print(f"创建默认图标失败: {e}")
-
-    def init_ui(self):
-        self.setWindowTitle("FPLO能带权重可视化工具")
-
-        # 设置自定义图标
-        self.set_window_icon()
-
-        # 智能窗口大小设置
-        try:
-            # 获取屏幕尺寸
-            screen = QApplication.primaryScreen()
-            screen_geometry = screen.geometry()
-            screen_width = screen_geometry.width()
-            screen_height = screen_geometry.height()
-
-            # 设置窗口大小为屏幕的80%
-            window_width = min(1400, int(screen_width * 0.8))
-            window_height = min(900, int(screen_height * 0.8))
-
-            # 居中显示
-            x = (screen_width - window_width) // 2
-            y = (screen_height - window_height) // 2
-
-            self.setGeometry(x, y, window_width, window_height)
-            print(f"窗口大小: {window_width}x{window_height}")
-
-        except Exception as e:
-            # 回退到固定大小
-            self.setGeometry(100, 100, 1200, 800)
-            print(f"使用默认窗口大小: {e}")
-
-        # 设置最小窗口大小
-        self.setMinimumSize(800, 600)
-
-        # 创建中央组件
-        central_widget = QWidget()
-        self.setCentralWidget(central_widget)
-        
-        # 主布局
-        main_layout = QHBoxLayout()
-
-        # 左侧：绘图区域
-        self.plot_splitter = QSplitter(Qt.Vertical)
-
-        self.plot_widget = InteractivePlotWidget()
-        self.plot_splitter.addWidget(self.plot_widget)
-
-        # 日志区域
-        self.log_widget = LogWidget()
-        self.plot_splitter.addWidget(self.log_widget)
-
-        self.plot_splitter.setSizes([700, 150])
-
-        # 右侧：控制面板
-        self.control_panel = ControlPanel()
-        self.control_panel.setMaximumWidth(350)  # 增加宽度以适应更多轨道
-
-        # 连接信号
-        self.control_panel.orbital_toggled.connect(self.plot_widget.toggle_orbital_visibility)
-        self.control_panel.view_mode_changed.connect(self.plot_widget.set_view_mode)
-        self.control_panel.settings_changed.connect(self.plot_widget.update_plot_settings)
-
-        # 设置控制面板引用，用于颜色方案更新时同步轨道复选框颜色
-        self.plot_widget.control_panel_ref = self.control_panel
-
-        # 保存布局引用以便隐藏/显示
-        self.main_layout = main_layout
-        main_layout.addWidget(self.plot_splitter, 3)
-        main_layout.addWidget(self.control_panel, 1)
-
-        # 记录控制面板和日志区域的可见状态
-        self.control_panel_visible = True
-        self.log_widget_visible = True
-
-        central_widget.setLayout(main_layout)
-        
-        # 创建菜单栏
-        self.create_menu_bar()
-        
-        # 创建状态栏
-        self.statusBar().showMessage("就绪")
-        
-        # 进度条
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setVisible(False)
-        self.statusBar().addPermanentWidget(self.progress_bar)
-        
-        self.log_widget.log_info("程序启动完成")
-
-    def toggle_control_panel(self):
-        """切换控制面板显示/隐藏"""
-        if self.control_panel_visible:
-            self.control_panel.hide()
-            self.control_panel_visible = False
-            self.log_widget.log_info("控制面板已隐藏")
-        else:
-            self.control_panel.show()
-            self.control_panel_visible = True
-            self.log_widget.log_info("控制面板已显示")
-
-    def toggle_log_widget(self):
-        """切换日志区域显示/隐藏"""
-        if self.log_widget_visible:
-            self.log_widget.hide()
-            self.log_widget_visible = False
-            # 调整分割器大小，给绘图区域更多空间
-            self.plot_splitter.setSizes([850, 0])
-        else:
-            self.log_widget.show()
-            self.log_widget_visible = True
-            # 恢复原始分割器大小
-            self.plot_splitter.setSizes([700, 150])
-            self.log_widget.log_info("日志区域已显示")
-
-    def create_menu_bar(self):
-        """创建美化的菜单栏"""
-        menubar = self.menuBar()
-
-        # 设置菜单栏样式和大小
-        menubar.setStyleSheet("""
-            QMenuBar {
-                background-color: #f0f0f0;
-                border-bottom: 1px solid #d0d0d0;
-                font-size: 14px;
-                font-weight: bold;
-                padding: 2px;
-                min-height: 28px;
-            }
-            QMenuBar::item {
-                background-color: transparent;
-                padding: 4px 10px;
-                margin: 1px;
-                border-radius: 3px;
-            }
-            QMenuBar::item:selected {
-                background-color: #e0e0e0;
-                border: 1px solid #c0c0c0;
-            }
-            QMenuBar::item:pressed {
-                background-color: #d0d0d0;
-            }
-            QMenu {
-                background-color: #f8f8f8;
-                border: 1px solid #d0d0d0;
-                border-radius: 4px;
-                font-size: 13px;
-                padding: 2px;
-            }
-            QMenu::item {
-                background-color: transparent;
-                padding: 4px 12px;
-                margin: 1px;
-                border-radius: 3px;
-            }
-            QMenu::item:selected {
-                background-color: #e0e0e0;
-                border: 1px solid #c0c0c0;
-            }
-            QMenu::item:pressed {
-                background-color: #d0d0d0;
-            }
-            QMenu::separator {
-                height: 1px;
-                background-color: #d0d0d0;
-                margin: 2px 0px;
-            }
-        """)
-
-        # 文件菜单
-        file_menu = menubar.addMenu('文件')
-
-        # 打开文件
-        open_action = file_menu.addAction('打开FPLO文件...')
-        open_action.setShortcut('Ctrl+O')
-        open_action.setStatusTip('打开FPLO +bweight文件进行分析')
-        open_action.triggered.connect(self.open_file)
-
-        file_menu.addSeparator()
-
-        # 导出图像子菜单
-        export_submenu = file_menu.addMenu('导出图像')
-        export_submenu.setStatusTip('将当前图形导出为不同格式和清晰度')
-
-        # PNG格式子菜单
-        png_submenu = export_submenu.addMenu('PNG格式')
-        png_standard_action = png_submenu.addAction('标准清晰度 (150 DPI)')
-        png_standard_action.setStatusTip('导出标准清晰度PNG，适合网页和演示')
-        png_standard_action.triggered.connect(lambda: self.export_image_with_quality('png', 'standard'))
-
-        png_high_action = png_submenu.addAction('高清晰度 (300 DPI)')
-        png_high_action.setStatusTip('导出高清晰度PNG，适合打印和发表')
-        png_high_action.triggered.connect(lambda: self.export_image_with_quality('png', 'high'))
-
-        png_ultra_action = png_submenu.addAction('超高清晰度 (600 DPI)')
-        png_ultra_action.setStatusTip('导出超高清晰度PNG，适合大尺寸打印')
-        png_ultra_action.triggered.connect(lambda: self.export_image_with_quality('png', 'ultra'))
-
-        export_pdf_action = export_submenu.addAction('PDF格式 (矢量)')
-        export_pdf_action.setStatusTip('导出矢量PDF，适合学术发表')
-        export_pdf_action.triggered.connect(lambda: self.export_image('pdf'))
-
-        export_svg_action = export_submenu.addAction('SVG格式 (可编辑)')
-        export_svg_action.setStatusTip('导出可编辑的SVG矢量图')
-        export_svg_action.triggered.connect(lambda: self.export_image('svg'))
-
-        file_menu.addSeparator()
-
-        exit_action = file_menu.addAction('退出程序')
-        exit_action.setShortcut('Ctrl+Q')
-        exit_action.setStatusTip('退出FPLO可视化工具')
-        exit_action.triggered.connect(self.close)
-
-        # 视图菜单
-        view_menu = menubar.addMenu('视图')
-
-        complete_action = view_menu.addAction('完整能带结构')
-        complete_action.setShortcut('Ctrl+1')
-        complete_action.setStatusTip('显示完整的能带结构')
-        complete_action.triggered.connect(lambda: self.switch_view('complete'))
-
-        fermi_action = view_menu.addAction('费米面专注模式')
-        fermi_action.setShortcut('Ctrl+2')
-        fermi_action.setStatusTip('专注显示费米能级附近的能带')
-        fermi_action.triggered.connect(lambda: self.switch_view('fermi'))
-
-        view_menu.addSeparator()
-
-        zoom_info_action = view_menu.addAction('框选放大 (Shift+拖拽)')
-        zoom_info_action.setEnabled(False)  # 仅作为提示
-        zoom_info_action.setStatusTip('按住Shift键并拖拽鼠标进行框选放大')
-
-        reset_zoom_action = view_menu.addAction('重置缩放')
-        reset_zoom_action.setShortcut('Ctrl+R')
-        reset_zoom_action.setStatusTip('重置到完整视图')
-        reset_zoom_action.triggered.connect(self.control_panel.reset_zoom)
-
-        view_menu.addSeparator()
-
-        refresh_action = view_menu.addAction('刷新图形')
-        refresh_action.setShortcut('F5')
-        refresh_action.setStatusTip('重新绘制当前图形')
-        refresh_action.triggered.connect(self.refresh_plot)
-
-        view_menu.addSeparator()
-
-        # 界面显示控制
-        toggle_panel_action = view_menu.addAction('切换控制面板')
-        toggle_panel_action.setShortcut('Ctrl+P')
-        toggle_panel_action.setStatusTip('显示/隐藏右侧控制面板')
-        toggle_panel_action.triggered.connect(self.toggle_control_panel)
-
-        toggle_log_action = view_menu.addAction('切换日志区域')
-        toggle_log_action.setShortcut('Ctrl+L')
-        toggle_log_action.setStatusTip('显示/隐藏底部日志区域')
-        toggle_log_action.triggered.connect(self.toggle_log_widget)
-
-        # 轨道菜单
-        orbital_menu = menubar.addMenu('轨道控制')
-
-        select_all_action = orbital_menu.addAction('全选轨道')
-        select_all_action.setShortcut('Ctrl+A')
-        select_all_action.setStatusTip('选中所有轨道进行显示')
-        select_all_action.triggered.connect(self.control_panel.select_all_orbitals)
-
-        deselect_all_action = orbital_menu.addAction('全不选轨道')
-        deselect_all_action.setShortcut('Ctrl+D')
-        deselect_all_action.setStatusTip('取消选中所有轨道')
-        deselect_all_action.triggered.connect(self.control_panel.deselect_all_orbitals)
-
-        invert_action = orbital_menu.addAction('反选轨道')
-        invert_action.setShortcut('Ctrl+I')
-        invert_action.setStatusTip('反转当前轨道选择状态')
-        invert_action.triggered.connect(self.control_panel.invert_orbital_selection)
-
-        # 样式菜单
-        style_menu = menubar.addMenu('样式')
-
-        academic_action = style_menu.addAction('学术标准')
-        academic_action.setStatusTip('使用学术发表标准的颜色方案')
-        academic_action.triggered.connect(self.set_academic_style)
-
-        colorful_action = style_menu.addAction('多彩模式')
-        colorful_action.setStatusTip('使用丰富多彩的颜色方案')
-        colorful_action.triggered.connect(self.set_colorful_style)
-
-        monochrome_action = style_menu.addAction('单色模式')
-        monochrome_action.setStatusTip('使用灰度单色方案')
-        monochrome_action.triggered.connect(self.set_monochrome_style)
-
-        # 工具菜单
-        tools_menu = menubar.addMenu('工具')
-
-        clear_cache_action = tools_menu.addAction('清除缓存')
-        clear_cache_action.setStatusTip('清除绘图缓存以释放内存')
-        clear_cache_action.triggered.connect(self.control_panel.clear_plot_cache)
-
-        performance_action = tools_menu.addAction('性能监控')
-        performance_action.setStatusTip('打开性能监控工具')
-        performance_action.triggered.connect(self.open_performance_monitor)
-
-        # 帮助菜单
-        help_menu = menubar.addMenu('帮助')
-
-        usage_action = help_menu.addAction('使用说明')
-        usage_action.setShortcut('F1')
-        usage_action.setStatusTip('查看详细使用说明')
-        usage_action.triggered.connect(self.show_usage_guide)
-
-        shortcuts_action = help_menu.addAction('快捷键')
-        shortcuts_action.setStatusTip('查看所有快捷键')
-        shortcuts_action.triggered.connect(self.show_shortcuts)
-
-        help_menu.addSeparator()
-
-        about_action = help_menu.addAction('关于程序')
-        about_action.setStatusTip('查看程序信息和版本')
-        about_action.triggered.connect(self.show_about_dialog)
-    
-    def open_file(self):
-        """打开文件"""
-        log_user_action("打开文件对话框")
-
-        filename, _ = QFileDialog.getOpenFileName(
-            self, "选择+bweight文件", "", "FPLO文件 (*+bweight*);;所有文件 (*)")
-
-        if filename:
-            log_user_action("选择文件", filename)
-            log_info(f"开始加载文件: {filename}")
-
-            # 保存当前文件名
-            self.current_filename = filename
-
-            # 显示进度条
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setValue(0)
-
-            # 创建数据加载线程
-            self.loader_thread = DataLoaderThread(filename)
-            self.loader_thread.progress.connect(self.progress_bar.setValue)
-            self.loader_thread.status.connect(lambda msg: log_info(msg))  # 重定向到日志管理器
-            self.loader_thread.finished.connect(self.on_data_loaded)
-            self.loader_thread.error.connect(self.on_load_error)
-            self.loader_thread.start()
-        else:
-            log_user_action("取消文件选择")
-    
-    def on_data_loaded(self, visualizer):
-        """数据加载完成"""
-        self.progress_bar.setVisible(False)
-
-        # 记录体系信息到日志管理器
-        elements = sorted(visualizer.elements)
-        orbital_types = sorted(visualizer.orbital_types)
-        logger.set_system_info(self.current_filename, elements)
-
-        # 设置绘图组件，传递文件名用于双可视化器切换
-        self.plot_widget.set_visualizer(visualizer, self.current_filename)
-
-        # 设置控制面板 - 传入完整的可视化器对象
-        self.control_panel.set_orbitals(visualizer)
-
-        # 输出详细的分析信息
-        log_info(f"数据加载完成！")
-        log_data_info("元素种类", f"{len(elements)} 种: {', '.join(elements)}")
-        log_data_info("轨道类型", f"{len(orbital_types)} 种: {', '.join(orbital_types)}")
-        log_data_info("轨道组合", f"总计 {len(visualizer.orbital_info)} 个")
-
-        # 输出每个轨道组合的详细信息
-        for orbital_key, indices in visualizer.orbital_info.items():
-            element, orbital_type = orbital_key.split('_')
-            color = visualizer.orbital_colors.get(orbital_key, '#95A5A6')
-            self.log_widget.log_info(f"  {element} {orbital_type}: {len(indices)} 个权重, 颜色: {color}")
-
-        log_info("可以开始分析，使用右侧面板控制显示")
-        self.statusBar().showMessage(f"数据已加载 - {len(elements)} 元素, {len(orbital_types)} 轨道类型")
-
-    def on_load_error(self, error_msg):
-        """数据加载错误"""
-        self.progress_bar.setVisible(False)
-        log_error(f"文件加载失败: {error_msg}")
-        QMessageBox.critical(self, "错误", f"文件加载失败:\n{error_msg}")
-
-    def switch_view(self, view_type):
-        """切换视图 - 支持新的视图切换系统"""
-        log_user_action("菜单切换视图", view_type)
-        log_info(f"切换到{view_type}视图")
-
-        # 同步更新控制面板的单选按钮
-        if hasattr(self.control_panel, 'set_view_mode_programmatically'):
-            self.control_panel.set_view_mode_programmatically(view_type)
-
-        # 直接设置绘图组件的视图模式
-        if hasattr(self.plot_widget, 'set_view_mode'):
-            self.plot_widget.set_view_mode(view_type)
-
-    def closeEvent(self, event):
-        """程序关闭事件 - 保存日志并关闭子进程"""
-        import subprocess  # 导入subprocess模块
-
-        log_status("程序正在关闭...")
-        log_user_action("关闭程序")
-
-        # 关闭性能监控进程
-        if self.performance_monitor_process and self.performance_monitor_process.poll() is None:
-            log_info("正在关闭性能监控进程...")
-            try:
-                self.performance_monitor_process.terminate()
-                # 等待进程结束，最多等待3秒
-                self.performance_monitor_process.wait(timeout=3)
-                log_info("性能监控进程已关闭")
-            except subprocess.TimeoutExpired:
-                # 如果进程没有在3秒内结束，强制杀死
-                log_warning("性能监控进程未响应，强制关闭")
-                self.performance_monitor_process.kill()
-            except Exception as e:
-                log_error(f"关闭性能监控进程时出错: {e}")
-
-        # 整理并保存日志文件
-        logger.finalize_log()
-
-        # 接受关闭事件
-        event.accept()
-
-    def refresh_plot(self):
-        """刷新图形"""
-        if self.plot_widget.visualizer:
-            self.plot_widget.plot_current_view()
-            self.log_widget.log_info("图形已刷新")
-
-    def set_academic_style(self):
-        """设置学术标准样式"""
-        settings = {'color_scheme': 'academic'}
-        self.plot_widget.update_plot_settings(settings)
-        self.log_widget.log_info("已切换到学术标准样式")
-
-    def set_colorful_style(self):
-        """设置多彩样式"""
-        settings = {'color_scheme': 'colorful'}
-        self.plot_widget.update_plot_settings(settings)
-        self.log_widget.log_info("已切换到多彩样式")
-
-    def set_monochrome_style(self):
-        """设置单色样式"""
-        settings = {'color_scheme': 'monochrome'}
-        self.plot_widget.update_plot_settings(settings)
-        self.log_widget.log_info("已切换到单色样式")
-
-    def open_performance_monitor(self):
-        """打开性能监控工具 - 随程序关闭而停止"""
-        try:
-            import subprocess
-            import sys
-
-            # 如果已有性能监控在运行，先关闭它
-            if self.performance_monitor_process and self.performance_monitor_process.poll() is None:
-                log_info("关闭已有的性能监控进程")
-                self.performance_monitor_process.terminate()
-                self.performance_monitor_process = None
-
-            # 尝试使用当前Python解释器
-            python_cmd = sys.executable
-
-            # 启动性能监控，保存进程引用
-            self.performance_monitor_process = subprocess.Popen([python_cmd, 'performance_monitor.py'])
-            log_info("性能监控工具已启动，将随主程序关闭而停止")
-
-        except FileNotFoundError:
-            log_error("找不到performance_monitor.py文件")
-            QMessageBox.warning(self, "警告", "找不到performance_monitor.py文件")
-
-        except Exception as e:
-            log_error(f"无法启动性能监控: {str(e)}")
-            QMessageBox.warning(self, "警告", f"无法启动性能监控工具:\n{str(e)}\n\n建议运行: pip install psutil")
-
-    # 删除了水印移除方法
-
-    # 删除了界面字体设置相关方法
-
-    def show_usage_guide(self):
-        """显示使用说明"""
-        usage_text = """
-        <h2>FPLO可视化工具使用指南</h2>
-
-        <h3>快速开始</h3>
-        <p>1. 点击 <b>打开FPLO文件</b> 加载+bweight文件</p>
-        <p>2. 在右侧面板控制轨道显示</p>
-        <p>3. 使用 <b>Shift+拖拽</b> 进行框选放大</p>
-
-        <h3>轨道控制</h3>
-        <p>• 每个轨道显示为: <b>元素 轨道类型 (权重数量)</b></p>
-        <p>• 复选框颜色对应轨道在图中的颜色</p>
-        <p>• 支持全选、全不选、反选操作</p>
-
-        <h3>视图模式</h3>
-        <p>• <b>完整能带结构</b>: 显示所有能带</p>
-        <p>• <b>费米面专注模式</b>: 只显示费米能级附近</p>
-
-        <h3>样式选择</h3>
-        <p>• <b>学术标准</b>: 适合论文发表</p>
-        <p>• <b>多彩模式</b>: 丰富的颜色区分</p>
-        <p>• <b>单色模式</b>: 灰度显示</p>
-
-        <h3>性能优化</h3>
-        <p>• 调整最大点数限制</p>
-        <p>• 启用多核处理和缓存机制</p>
-        <p>• 使用权重阈值过滤数据</p>
-        """
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("使用说明")
-        msg.setText(usage_text)
-        msg.setTextFormat(Qt.RichText)
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.exec_()
-
-    def show_shortcuts(self):
-        """显示快捷键"""
-        shortcuts_text = """
-        <h2>快捷键列表</h2>
-
-        <table border="1" cellpadding="5" cellspacing="0">
-        <tr><th>快捷键</th><th>功能</th></tr>
-        <tr><td><b>Ctrl+O</b></td><td>打开文件</td></tr>
-        <tr><td><b>Ctrl+Q</b></td><td>退出程序</td></tr>
-        <tr><td><b>Ctrl+1</b></td><td>完整能带结构</td></tr>
-        <tr><td><b>Ctrl+2</b></td><td>费米面专注模式</td></tr>
-        <tr><td><b>Ctrl+A</b></td><td>全选轨道</td></tr>
-        <tr><td><b>Ctrl+D</b></td><td>全不选轨道</td></tr>
-        <tr><td><b>Ctrl+I</b></td><td>反选轨道</td></tr>
-        <tr><td><b>Ctrl+R</b></td><td>重置缩放</td></tr>
-        <tr><td><b>F5</b></td><td>刷新图形</td></tr>
-        <tr><td><b>F1</b></td><td>使用说明</td></tr>
-        <tr><td><b>Ctrl+P</b></td><td>切换控制面板</td></tr>
-        <tr><td><b>Ctrl+L</b></td><td>切换日志区域</td></tr>
-        <tr><td><b>Shift+拖拽</b></td><td>框选放大</td></tr>
-        </table>
-
-        <p><i>提示: 鼠标悬停在菜单项上可查看详细说明</i></p>
-        """
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("快捷键")
-        msg.setText(shortcuts_text)
-        msg.setTextFormat(Qt.RichText)
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.exec_()
-
-    def show_about_dialog(self):
-        """显示关于对话框"""
-        about_text = """
-        <h2>FPLO能带权重可视化工具</h2>
-
-        <p><b>版本:</b> 2.0.0 (性能优化版)</p>
-        <p><b>开发:</b> 中国科学技术大学</p>
-
-        <h3>主要功能</h3>
-        <ul>
-        <li>交互式FPLO能带结构可视化</li>
-        <li>轨道权重投影分析</li>
-        <li>费米面专注模式</li>
-        <li>框选放大功能</li>
-        <li>多种颜色方案</li>
-        <li>多核处理优化</li>
-        <li>高质量图像导出</li>
-        </ul>
-
-        <h3>支持格式</h3>
-        <p>输入: FPLO +bweight文件</p>
-        <p>输出: PNG, PDF, SVG格式</p>
-
-        <h3>技术栈</h3>
-        <p>Python 3.7+ • PyQt5 • Matplotlib • NumPy • SciPy</p>
-
-        <p><i>感谢使用FPLO可视化工具！</i></p>
-        """
-
-        msg = QMessageBox(self)
-        msg.setWindowTitle("关于程序")
-        msg.setText(about_text)
-        msg.setTextFormat(Qt.RichText)
-        msg.setStandardButtons(QMessageBox.Ok)
-        msg.exec_()
-
-    def export_image(self, format_type=None):
-        """导出图像"""
-        if not self.plot_widget.visualizer:
-            QMessageBox.warning(self, "警告", "请先加载数据文件")
-            return
-
-        # 根据格式类型设置文件对话框
-        if format_type == 'png':
-            filter_str = "PNG文件 (*.png)"
-            default_ext = ".png"
-        elif format_type == 'pdf':
-            filter_str = "PDF文件 (*.pdf)"
-            default_ext = ".pdf"
-        elif format_type == 'svg':
-            filter_str = "SVG文件 (*.svg)"
-            default_ext = ".svg"
-        elif format_type == 'eps':
-            filter_str = "EPS文件 (*.eps)"
-            default_ext = ".eps"
-        else:
-            filter_str = "PNG文件 (*.png);;PDF文件 (*.pdf);;SVG文件 (*.svg);;EPS文件 (*.eps)"
-            default_ext = ".png"
-
-        # 生成默认文件名
-        view_mode = self.plot_widget.current_plot_type
-        default_name = f"fplo_band_structure_{view_mode}{default_ext}"
-
-        filename, _ = QFileDialog.getSaveFileName(
-            self, "保存图像", default_name, filter_str)
-
-        if filename:
-            try:
-                # 获取DPI设置
-                dpi = self.plot_widget.plot_settings.get('figure_dpi', 150)
-
-                # 保存图像
-                self.plot_widget.figure.savefig(
-                    filename,
-                    dpi=dpi,
-                    bbox_inches='tight',
-                    facecolor='white',
-                    edgecolor='none',
-                    transparent=False
-                )
-
-                self.log_widget.log_info(f"图像已保存: {filename} (DPI: {dpi})")
-                QMessageBox.information(self, "成功", f"图像导出成功!\n文件: {filename}")
-
-            except Exception as e:
-                self.log_widget.log_error(f"图像导出失败: {str(e)}")
-                QMessageBox.critical(self, "错误", f"图像导出失败:\n{str(e)}")
-
-    def export_image_with_quality(self, format_type, quality):
-        """导出指定清晰度的图像"""
-        if not hasattr(self.plot_widget, 'figure') or self.plot_widget.figure is None:
-            QMessageBox.warning(self, "警告", "没有可导出的图形")
-            return
-
-        # 清晰度设置
-        quality_settings = {
-            'standard': {'dpi': 150, 'desc': '标准清晰度'},
-            'high': {'dpi': 300, 'desc': '高清晰度'},
-            'ultra': {'dpi': 600, 'desc': '超高清晰度'}
-        }
-
-        if quality not in quality_settings:
-            quality = 'standard'
-
-        dpi = quality_settings[quality]['dpi']
-        desc = quality_settings[quality]['desc']
-
-        # 文件格式设置
-        if format_type == 'png':
-            filter_str = "PNG图像 (*.png)"
-            default_ext = ".png"
-        else:
-            # 其他格式保持原有逻辑
-            self.export_image(format_type)
-            return
-
-        # 生成默认文件名
-        view_mode = self.plot_widget.current_plot_type
-        default_name = f"fplo_band_structure_{view_mode}_{quality}{default_ext}"
-
-        filename, _ = QFileDialog.getSaveFileName(
-            self, f"导出{desc}图像", default_name, filter_str)
-
-        if filename:
-            try:
-                # 保存图像
-                self.plot_widget.figure.savefig(
-                    filename,
-                    dpi=dpi,
-                    bbox_inches='tight',
-                    facecolor='white',
-                    edgecolor='none',
-                    format=format_type,
-                    transparent=False
-                )
-
-                self.log_widget.log_info(f"图像已导出: {filename} ({desc}, {dpi} DPI)")
-                QMessageBox.information(self, "导出成功",
-                                      f"图像已成功导出为 {desc}\n"
-                                      f"文件: {filename}\n"
-                                      f"分辨率: {dpi} DPI")
-
-            except Exception as e:
-                self.log_widget.log_error(f"导出图像失败: {str(e)}")
-                QMessageBox.critical(self, "导出失败", f"导出图像时发生错误:\n{str(e)}")
+# [Deprecated 20250827] MainWindow 已迁移至 gui/main_window.py；
+# 本文件保留占位类以避免命名冲突与历史引用。
+class LegacyMainWindow(QMainWindow):
+    """[Deprecated] 旧主窗口占位类。实际主窗口请从 gui.main_window 导入 MainWindow."""
+    pass
 
 def check_environment():
     """检查运行环境"""
@@ -3907,8 +2904,11 @@ def main():
         except:
             pass
 
+        # 延迟导入以避免循环依赖，并使用别名规避同名占位符
+        from gui.main_window import MainWindow as AppMainWindow
+
         # 创建主窗口
-        window = MainWindow()
+        window = AppMainWindow()
 
         # 设置窗口属性以提高兼容性
         window.setAttribute(Qt.WA_OpaquePaintEvent, False)
@@ -3940,5 +2940,4 @@ if __name__ == "__main__":
         print("3. 检查依赖库是否正确安装")
         sys.exit(1)
 
-if __name__ == '__main__':
-    main()
+# 仅保留一个入口块（上方 try/except 包装的 main() 调用）。
