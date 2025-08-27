@@ -1278,6 +1278,10 @@ class InteractivePlotWidget(QWidget):
                              framealpha=self.legend_settings['framealpha'],
                              edgecolor=self.legend_settings['edgecolor'],
                              facecolor=self.legend_settings['facecolor'])
+            
+            # 设置字体粗细
+            for text in legend.get_texts():
+                text.set_fontweight(self.legend_settings.get('fontweight', 'normal'))
 
             # 设置图例边框
             legend.get_frame().set_linewidth(0.8)
@@ -1450,6 +1454,7 @@ class InteractivePlotWidget(QWidget):
         # 同步设置到费米可视化器
         if hasattr(self, 'fermi_visualizer') and self.fermi_visualizer:
             self.fermi_visualizer.plot_settings = self.plot_settings
+            
 
         # 如果颜色方案改变，重新分配颜色
         if 'color_scheme' in settings:
@@ -1785,22 +1790,6 @@ class ControlPanel(QWidget):
         self.band_alpha_label = QLabel("0.6")
         band_layout.addWidget(self.band_alpha_label, 4, 2)
 
-        # 能带条数设置
-        band_layout.addWidget(QLabel("费米面上能带数:"), 5, 0)
-        self.bands_above_fermi_spin = QSpinBox()
-        self.bands_above_fermi_spin.setRange(1, 50)
-        self.bands_above_fermi_spin.setValue(10)
-        self.bands_above_fermi_spin.setToolTip("显示费米面以上的能带条数")
-        self.bands_above_fermi_spin.valueChanged.connect(self.on_band_settings_changed)
-        band_layout.addWidget(self.bands_above_fermi_spin, 5, 1, 1, 2)
-
-        band_layout.addWidget(QLabel("费米面下能带数:"), 6, 0)
-        self.bands_below_fermi_spin = QSpinBox()
-        self.bands_below_fermi_spin.setRange(1, 50)
-        self.bands_below_fermi_spin.setValue(10)
-        self.bands_below_fermi_spin.setToolTip("显示费米面以下的能带条数")
-        self.bands_below_fermi_spin.valueChanged.connect(self.on_band_settings_changed)
-        band_layout.addWidget(self.bands_below_fermi_spin, 6, 1, 1, 2)
 
         band_tab.setLayout(band_layout)
 
@@ -2249,6 +2238,38 @@ class ControlPanel(QWidget):
         # 发送视图模式改变信号
         print(f"发送视图模式改变信号: {current_mode}")
         self.view_mode_changed.emit(current_mode)
+        
+        # 更新费米能带数控件的启用状态
+        self.update_fermi_band_controls(current_mode)
+
+
+    def update_fermi_band_controls(self, mode):
+        """根据视图模式更新费米相关控件的启用状态"""
+        is_fermi_mode = (mode == "fermi")
+        
+        
+        # 启用/禁用费米窗口控件
+        # 找到费米窗口标签
+        fermi_window_label = None
+        for i in range(self.fermi_tab.layout().count()):
+            item = self.fermi_tab.layout().itemAt(i)
+            if item and item.widget() and isinstance(item.widget(), QLabel):
+                if "费米窗口" in item.widget().text():
+                    fermi_window_label = item.widget()
+                    break
+        
+        if fermi_window_label:
+            fermi_window_label.setEnabled(is_fermi_mode)
+        
+        self.fermi_window_min.setEnabled(is_fermi_mode)
+        self.fermi_window_max.setEnabled(is_fermi_mode)
+        
+        # 更新样式以视觉上区分启用/禁用状态
+        style = "" if is_fermi_mode else "color: gray;"
+        if fermi_window_label:
+            fermi_window_label.setStyleSheet(style)
+        
+        print(f"费米相关控件{'启用' if is_fermi_mode else '禁用'}")
 
     def get_current_view_mode(self):
         """获取当前视图模式"""
@@ -2846,9 +2867,6 @@ class ControlPanel(QWidget):
             'band_line_style': self.band_style_combo.currentText(),
             'band_line_width': self.band_width_spin.value(),
             'band_line_alpha': band_alpha,
-            # 新增的能带条数设置
-            'bands_above_fermi': self.bands_above_fermi_spin.value(),
-            'bands_below_fermi': self.bands_below_fermi_spin.value()
         }
         self.settings_changed.emit(settings)
 

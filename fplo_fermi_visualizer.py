@@ -50,7 +50,8 @@ class FPLOFermiVisualizer:
         self.conduction_bands = []
         self.energy_window = None
         self.user_fermi_window = None  # 用户设置的费米窗口
-        self.default_fermi_window = 4.0  # 默认费米窗口大小 (eV)
+        
+        self.default_fermi_window = 2.0  # 默认费米窗口大小 (eV)
         
         # 25种精选颜色调色板
         self.color_palette = [
@@ -80,24 +81,24 @@ class FPLOFermiVisualizer:
         """设置matplotlib字体和参数"""
         # 检查Times New Roman字体
         available_fonts = [f.name for f in fm.fontManager.ttflist]
-        times_fonts = ['Times New Roman', 'Times', 'serif']
-        
-        for font in times_fonts:
-            if font in available_fonts:
-                plt.rcParams['font.family'] = font
-                print(f"使用字体: {font}")
-                break
-        else:
-            plt.rcParams['font.family'] = 'DejaVu Sans'
-            print("使用默认英文字体: DejaVu Sans")
-        
-        plt.rcParams['figure.dpi'] = 200
-        plt.rcParams['savefig.dpi'] = 200
         plt.rcParams['axes.unicode_minus'] = False
+        plt.rcParams['figure.dpi'] = 150
+        plt.rcParams['savefig.dpi'] = 300
+        plt.rcParams['font.size'] = 14
         
+    def set_band_count_limits(self, bands_above=None, bands_below=None):
+        """设置费米线上/下显示的能带数量"""
+        if bands_above is not None:
+            self.bands_above_fermi = max(1, min(50, bands_above))
+            print(f"设置费米面上能带数: {self.bands_above_fermi}")
+        
+        if bands_below is not None:
+            self.bands_below_fermi = max(1, min(50, bands_below))
+            print(f"设置费米面下能带数: {self.bands_below_fermi}")
+
     def parse_header_and_system(self):
         """解析头部和体系信息"""
-        print("=== 解析体系信息 ===")
+        print("\n=== 解析体系信息 ===\n")
         
         with open(self.filename, 'r') as f:
             # 解析第一行头部信息
@@ -784,7 +785,8 @@ class FPLOFermiVisualizer:
         """识别费米面附近的重要能带"""
         print("\n=== 识别重要能带 ===")
         
-        important_bands = []
+        # 选择在能量窗口内的所有能带
+        selected_bands = []
         
         for band_idx in range(self.num_bands):
             band_energies = self.band_energies[:, band_idx]
@@ -793,25 +795,13 @@ class FPLOFermiVisualizer:
             in_window = np.any((band_energies >= self.energy_window[0]) & 
                               (band_energies <= self.energy_window[1]))
             
-            # 检查能带是否跨越费米面
-            crosses_fermi = (np.min(band_energies) <= self.fermi_energy <= np.max(band_energies))
-            
-            # 检查能带是否接近费米面
-            min_distance_to_fermi = np.min(np.abs(band_energies - self.fermi_energy))
-            close_to_fermi = min_distance_to_fermi <= 3.0  # 3 eV内
-            
-            if in_window and (crosses_fermi or close_to_fermi):
-                important_bands.append(band_idx)
-                
-                if crosses_fermi:
-                    print(f"能带 {band_idx}: 跨越费米面")
-                else:
-                    print(f"能带 {band_idx}: 接近费米面 (最小距离: {min_distance_to_fermi:.3f} eV)")
+            if in_window:
+                selected_bands.append(band_idx)
         
-        self.important_bands = important_bands
-        print(f"识别到 {len(important_bands)} 条重要能带")
+        self.important_bands = sorted(selected_bands)
+        print(f"总计识别到 {len(self.important_bands)} 条重要能带（在能量窗口内）")
         
-        return important_bands
+        return self.important_bands
 
     def create_output_folder(self):
         """创建输出文件夹"""
