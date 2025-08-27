@@ -2,6 +2,22 @@
 # -*- coding: utf-8 -*-
 """
 FPLO能带权重可视化GUI主程序
+
+=== 文件结构导航 ===
+1. 导入和配置 (行 1-60)
+2. 工具类 (行 61-228)
+   - PlotCache: 绘图缓存管理器
+   - MultiCoreProcessor: 多核处理器
+   - DataLoaderThread: 数据加载线程
+3. 绘图组件 (行 229-1552)
+   - InteractivePlotWidget: 交互式绘图组件
+4. 控制面板 (行 1553-2952)
+   - ControlPanel: 主要的设置控制面板
+5. 日志组件 (行 2953-3003)
+   - LogWidget: 日志显示组件
+6. 主窗口 (行 3004-3893)
+   - MainWindow: 应用程序主窗口
+7. 程序入口 (行 3894+)
 """
 
 import sys
@@ -55,6 +71,17 @@ import re
 import colorsys
 from matplotlib.patches import Rectangle
 from matplotlib.text import Text
+
+# 导入可视化器
+from fplo_visualizer import FPLOVisualizer
+from fplo_fermi_visualizer import FPLOFermiVisualizer
+
+# 导入性能监控器
+from performance_monitor import PerformanceMonitor
+
+# ============================================================================
+# 2. 工具类模块
+# ============================================================================
 
 # 移除自定义DraggableLegend类，使用matplotlib内置功能
 # class DraggableLegend:
@@ -225,6 +252,10 @@ class DataLoaderThread(QThread):
             
         except Exception as e:
             self.error.emit(f"数据加载失败: {str(e)}")
+
+# ============================================================================
+# 3. 绘图组件模块
+# ============================================================================
 
 class InteractivePlotWidget(QWidget):
     """增强的交互式绘图组件"""
@@ -1549,6 +1580,10 @@ class InteractivePlotWidget(QWidget):
                 self.is_zoomed = False
                 self.plot_current_view()
                 print("已重置缩放")
+
+# ============================================================================
+# 4. 控制面板模块 - 主要的GUI设置界面
+# ============================================================================
 
 class ControlPanel(QWidget):
     """增强的控制面板"""
@@ -2950,6 +2985,10 @@ class ControlPanel(QWidget):
             settings = {'band_line_color': color.name()}
             self.settings_changed.emit(settings)
 
+# ============================================================================
+# 5. 日志组件模块
+# ============================================================================
+
 class LogWidget(QTextEdit):
     """日志显示组件 - 连接到日志管理器"""
 
@@ -3000,6 +3039,10 @@ class LogWidget(QTextEdit):
     def log_error(self, message):
         """兼容性方法 - 重定向到日志管理器"""
         log_error(message)
+
+# ============================================================================
+# 6. 主窗口模块 - 应用程序主界面
+# ============================================================================
 
 class MainWindow(QMainWindow):
     """主窗口"""
@@ -3864,29 +3907,28 @@ def main():
 
         window.show()
 
-        print("GUI启动成功")
+        # 启动应用程序
         sys.exit(app.exec_())
+        
+    except Exception as e:
+        print(f"应用程序运行时发生错误: {str(e)}")
+        print("请检查系统环境和依赖库是否正确安装")
+        sys.exit(1)
 
+# ============================================================================
+# 7. 程序入口
+# ============================================================================
+
+if __name__ == "__main__":
+    try:
+        main()
     except Exception as e:
         print(f"GUI启动失败: {str(e)}")
         print("")
         print("可能的解决方案:")
-        print("1. 使用无头模式: python3 run_headless.py +bweights")
-        print("2. 检查图形环境配置")
-        print("3. 更新Qt和PyQt5库")
-
-        # 尝试无头模式
-        if os.path.exists("+bweights"):
-            print("")
-            response = input("是否自动启动无头模式? (y/N): ")
-            if response.lower() == 'y':
-                try:
-                    import subprocess
-                    subprocess.run([sys.executable, "run_headless.py", "+bweights"])
-                    return
-                except:
-                    pass
-
+        print("1. 检查系统环境变量")
+        print("2. 更新Qt和PyQt5库")
+        print("3. 检查依赖库是否正确安装")
         sys.exit(1)
 
 if __name__ == '__main__':
