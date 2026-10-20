@@ -14,7 +14,11 @@ FPLO费米面附近能带可视化程序 - Wannier投影专用版本
 版本: Fermi-Focused 1.0
 """
 
+from orbital_data import (check_cancelled, parse_orbital_labels, parse_orbital_columns,
+                          read_weight_header, read_weight_data, prepare_weight_points, weight_point_sizes, bands_in_window)
+
 import numpy as np
+from weight_plot import add_weight_scale
 import matplotlib.pyplot as plt
 import matplotlib.font_manager as fm
 import re
@@ -29,8 +33,10 @@ matplotlib.use('Agg')
 class FPLOFermiVisualizer:
     """FPLO费米面附近能带可视化器 - Wannier投影专用"""
     
-    def __init__(self, filename='+bweights'):
+    def __init__(self, filename='+bweights', *, cancel_check=None, configure_plot=True):
         """初始化可视化器"""
+        self._cancel_check = cancel_check
+        check_cancelled(self)
         self.filename = filename
         self.header_info = {}
         self.orbital_info = {}
@@ -64,7 +70,8 @@ class FPLOFermiVisualizer:
         self.orbital_colors = {}
         
         # 设置matplotlib
-        self._setup_matplotlib()
+        if configure_plot:
+            self._setup_matplotlib()
 
         # 读取和解析数据
         print(f"正在加载费米专注可视化器数据: {filename}")
@@ -97,153 +104,29 @@ class FPLOFermiVisualizer:
             print(f"设置费米面下能带数: {self.bands_below_fermi}")
 
     def parse_header_and_system(self):
-        """解析头部和体系信息"""
-        print("\n=== 解析体系信息 ===\n")
-        
-        with open(self.filename, 'r') as f:
-            # 解析第一行头部信息
-            header_line = f.readline().strip()
-            if header_line.startswith('#'):
-                parts = header_line.split()
-                self.header_info = {
-                    'num_bands': int(parts[1]),
-                    'original_fermi_energy': float(parts[2]),  # 原始费米能级（仅作记录）
-                    'fermi_energy': 0.0,  # 实际费米能级设为0（因为数据已减去费米能）
-                    'num_kpoints': int(parts[3]),
-                    'num_orbitals': int(parts[4])
-                }
-                self.fermi_energy = 0.0  # 费米能级设为0
-                print(f"原始费米能级: {self.header_info['original_fermi_energy']:.6f} eV (已从数据中减去)")
-                print(f"当前费米能级: {self.fermi_energy:.6f} eV (数据参考点)")
-
-            # 解析第二行轨道标签
-            orbital_line = f.readline().strip()
-            if orbital_line.startswith('#'):
-                self._parse_orbital_labels(orbital_line[1:].strip())
-        
-        print(f"费米能级: {self.fermi_energy:.6f} eV (数据参考点)")
-        print(f"能带数量: {self.header_info['num_bands']}")
-        print(f"识别到元素: {sorted(self.elements)}")
-        print(f"识别到轨道类型: {sorted(self.orbital_types)}")
-        
-        # 动态分配颜色
+        """Validate the declared schema before replacing existing metadata."""
+        header, columns, groups = read_weight_header(self.filename)
+        self.header_info = header
+        self.orbital_columns = columns
+        self.orbital_info = groups
+        self.elements = {column['element'] for column in columns}
+        self.orbital_types = {column['shell'] for column in columns}
+        self._group_weight_cache = {}
         self._assign_colors()
+        print(f"原始费米能级: {header['original_fermi_energy']:.6f}; 输入按相对 EF 的 eV 读取，不额外平移")
+        print(f"完整数据: {header['num_kpoints']} k点, {header['num_bands']} 能带, {len(groups)} 个原子壳层")
+        self.fermi_energy = header['fermi_energy']
         
+
     def _parse_orbital_labels(self, orbital_text):
-        """解析轨道标签（通用：元素 + nℓ），并在失败时回退到（元素 + ℓ）
-
-        设计说明：
-        - 解析如 "Cs (001)5p1/2-1/2" 或 "Cs(001)5p1/2-1/2" 等标签。
-        - 提取 element, n, ℓ（s/p/d/f），忽略原子编号与自旋分裂 j、m_j。
-        - 生成键："元素_nℓ"（示例："Cs_5p"），并将所有自旋分量合并到该组。
-        - 若无法提取 n，仅提取 ℓ，回退为 "元素_ℓ"（示例："Cs_p"），并打印警告。
-
-        兼容性：
-        - 绘图代码通过遍历 self.orbital_info 的键工作，故直接兼容新的键格式。
-        - self.orbital_types 改为存储出现的 "nℓ" 或回退时的 "ℓ" 字符串，用于颜色分配与图例。
-        """
-
-        orbital_parts = orbital_text.split()
-
-        # 跳过前两列 (k点和能量标签)
-        if len(orbital_parts) >= 2:
-            if orbital_parts[0] in ['#', 'ik'] or 'e(k' in orbital_parts[1]:
-                print(f"跳过前两列标签: {orbital_parts[0]} {orbital_parts[1]}")
-                orbital_parts = orbital_parts[2:]  # 从第三列开始
-
-        print(f"解析轨道标签: {len(orbital_parts)} 个部分")
-
-        # 解析游标：轨道列索引递增，用于映射到权重列
-        orbital_index = 0
-        i = 0
-
-        # 统一的正则模板
-        # 1) 紧凑格式："Cs(001)5p1/2-1/2"，捕获 element, n, l
-        compact_pat = re.compile(r'^([A-Z][a-z]?)\(\d+\)(\d+)([spdf])')
-        # 2) 分隔格式：element 与轨道信息分开："Cs" + "(001)5p1/2-1/2"
-        split_pat = re.compile(r'^\(\d+\)(\d+)([spdf])')
-        # 3) 仅能拿到 ℓ 的回退：从包含 n 失败时尝试仅提取 ℓ
-        l_only_compact_pat = re.compile(r'^([A-Z][a-z]?)\(\d+\).*?([spdf])')
-        l_only_split_pat = re.compile(r'^\(\d+\).*?([spdf])')
-
-        while i < len(orbital_parts):
-            current = orbital_parts[i]
-
-            # 情况A：紧凑写法（元素与轨道在同一token）
-            m = compact_pat.match(current)
-            if m:
-                element, n, l_letter = m.group(1), m.group(2), m.group(3)
-                key_suffix = f"{n}{l_letter}"
-                orbital_key = f"{element}_{key_suffix}"
-
-                self.elements.add(element)
-                self.orbital_types.add(key_suffix)
-                if orbital_key not in self.orbital_info:
-                    self.orbital_info[orbital_key] = []
-                self.orbital_info[orbital_key].append(orbital_index)
-
-                orbital_index += 1
-                i += 1
-                continue
-
-            # 情况B：拆分写法（当前是元素名，下一token是轨道信息）
-            element_match = re.match(r'^([A-Z][a-z]?)$', current)
-            if element_match and i + 1 < len(orbital_parts):
-                element = element_match.group(1)
-                next_token = orbital_parts[i + 1]
-
-                # 尝试从下一token提取 n 和 ℓ
-                m = split_pat.match(next_token)
-                if m:
-                    n, l_letter = m.group(1), m.group(2)
-                    key_suffix = f"{n}{l_letter}"
-                    orbital_key = f"{element}_{key_suffix}"
-
-                    self.elements.add(element)
-                    self.orbital_types.add(key_suffix)
-                    if orbital_key not in self.orbital_info:
-                        self.orbital_info[orbital_key] = []
-                    self.orbital_info[orbital_key].append(orbital_index)
-
-                    orbital_index += 1
-                    i += 2
-                    continue
-                else:
-                    # 回退：仅提取 ℓ
-                    m = l_only_split_pat.match(next_token)
-                    if m:
-                        l_letter = m.group(1)
-                        orbital_key = f"{element}_{l_letter}"
-                        self.elements.add(element)
-                        self.orbital_types.add(l_letter)
-                        if orbital_key not in self.orbital_info:
-                            self.orbital_info[orbital_key] = []
-                        self.orbital_info[orbital_key].append(orbital_index)
-                        print(f"    警告: {element} 无法解析主量子数n，回退为 '{orbital_key}'")
-
-                        orbital_index += 1
-                        i += 2
-                        continue
-
-            # 情况C：紧凑写法但无法提取n，回退仅提取ℓ
-            m = l_only_compact_pat.match(current)
-            if m:
-                element, l_letter = m.group(1), m.group(2)
-                orbital_key = f"{element}_{l_letter}"
-                self.elements.add(element)
-                self.orbital_types.add(l_letter)
-                if orbital_key not in self.orbital_info:
-                    self.orbital_info[orbital_key] = []
-                self.orbital_info[orbital_key].append(orbital_index)
-                print(f"    警告: {current} 无法解析主量子数n，回退为 '{orbital_key}'")
-
-                orbital_index += 1
-                i += 1
-                continue
-
-            # 如果都不匹配，跳过
-            print(f"    跳过无法识别的部分: {current}")
-            i += 1
+        """Replace groups atomically so repeated header parsing is idempotent."""
+        columns = parse_orbital_columns(orbital_text)
+        groups = parse_orbital_labels(orbital_text)
+        self.orbital_columns = columns
+        self.orbital_info = groups
+        self.elements = {column['element'] for column in columns}
+        self.orbital_types = {key.split('_', 1)[1] for key in groups}
+        self._group_weight_cache = {}
 
                         
     def _assign_colors(self):
@@ -251,7 +134,7 @@ class FPLOFermiVisualizer:
         print("\n=== 颜色分配信息 ===")
         
         color_index = 0
-        elements = sorted(self.elements)
+        elements = sorted({key.split('_', 1)[0] for key in self.orbital_info})
         orbital_types = sorted(self.orbital_types)
         
         for element in elements:
@@ -266,87 +149,28 @@ class FPLOFermiVisualizer:
         print(f"总计分配颜色: {len(self.orbital_colors)} 种")
         
     def read_and_parse_data(self, max_kpoints=None):
-        """读取和解析数据"""
-        print("\n=== 读取和解析数据 ===")
-        
-        # 读取所有数据
-        all_data = []
-        with open(self.filename, 'r') as f:
-            f.readline()  # 跳过头部
-            f.readline()
-            
-            for line in f:
-                line = line.strip()
-                if line and not line.startswith('#'):
-                    parts = line.split()
-                    if len(parts) >= 3:
-                        k_point = float(parts[0])
-                        energy = float(parts[1])
-                        weights = [float(w) for w in parts[2:]]
-                        all_data.append([k_point, energy] + weights)
-        
-        all_data = np.array(all_data)
-        print(f"读取数据点: {len(all_data):,}")
-        
-        # 识别能带数量
-        num_bands = 0
-        for i, row in enumerate(all_data):
-            if abs(row[0]) < 1e-6:  # k点接近0
-                num_bands += 1
-            else:
-                break
-        
-        print(f"识别能带数量: {num_bands}")
-        
-        # 计算k点数量并应用采样
-        total_points = len(all_data)
-        num_kpoints = total_points // num_bands
-        print(f"每条能带k点数: {num_kpoints}")
-        
-        if max_kpoints and num_kpoints > max_kpoints:
-            k_sample_step = num_kpoints // max_kpoints
-            print(f"应用k点采样，步长: {k_sample_step}")
-        else:
-            k_sample_step = 1
-        
-        # 重新组织数据
-        sampled_kpoints = list(range(0, num_kpoints, k_sample_step))
-        self.k_points = []
-        self.band_energies = []
-        self.band_weights = []
-        
-        for k_idx in sampled_kpoints:
-            energies_at_k = []
-            weights_at_k = []
-            
-            for band_idx in range(num_bands):
-                data_idx = k_idx * num_bands + band_idx
-                if data_idx < len(all_data):
-                    row = all_data[data_idx]
-                    k_point = row[0]
-                    energy = row[1]
-                    weights = row[2:]
-                    
-                    energies_at_k.append(energy)
-                    weights_at_k.append(weights)
-                    
-                    if band_idx == 0:
-                        self.k_points.append(k_point)
-            
-            self.band_energies.append(energies_at_k)
-            self.band_weights.append(weights_at_k)
-        
-        self.k_points = np.array(self.k_points)
-        self.band_energies = np.array(self.band_energies)
-        self.band_weights = np.array(self.band_weights)
-        self.num_bands = num_bands
-        self.num_kpoints = len(self.k_points)
-        self.weights_data = self.band_weights  # 为了兼容新函数
-
-        print(f"数据重组完成: {self.num_kpoints} k点, {self.num_bands} 能带")
-        
+        """Load complete immutable arrays; max_kpoints only controls display."""
+        if max_kpoints is not None and (isinstance(max_kpoints, bool) or
+                not isinstance(max_kpoints, (int, np.integer)) or max_kpoints < 1):
+            raise ValueError('Display k-point limit must be a positive integer or None')
+        k_points, energies, weights = read_weight_data(
+            self.filename, self.header_info, self.orbital_columns, owner=self)
+        check_cancelled(self)
+        self.k_points = k_points
+        self.band_energies = energies
+        self.band_weights = weights
+        self.num_kpoints, self.num_bands = energies.shape
+        self.plot_max_kpoints = max_kpoints
+        self._group_weight_cache = {}
+        self._group_weight_source = None
+        self.validation_warnings = []
+        if np.any(weights < 0):
+            self.validation_warnings.append('输入包含负权重；保留原值，正阈值散点不显示负值。')
+        print(f"完整数据已校验: {self.num_kpoints} k点, {self.num_bands} 能带；仅显示时抽样")
+        self.weights_data = self.band_weights
         return self._analyze_fermi_region()
         
+
     def _analyze_fermi_region(self):
         """分析费米面附近区域"""
         print("\n=== 费米面区域分析 ===")
@@ -355,8 +179,8 @@ class FPLOFermiVisualizer:
         all_energies = self.band_energies.flatten()
 
         # 分析价带和导带 (费米能级为0 eV)
-        valence_energies = all_energies[all_energies <= 0.0]  # 费米能级以下
-        conduction_energies = all_energies[all_energies > 0.0]  # 费米能级以上
+        valence_energies = all_energies[all_energies <= self.fermi_energy]  # 费米能级以下
+        conduction_energies = all_energies[all_energies > self.fermi_energy]  # 费米能级以上
 
         if len(valence_energies) > 0:
             vbm = np.max(valence_energies)  # 价带顶
@@ -373,7 +197,12 @@ class FPLOFermiVisualizer:
             print("未找到导带 (所有能带都在费米能级以下)")
 
         # 计算带隙
-        band_gap = cbm - vbm
+        # A sampled band crossing EF is metallic even if no sample equals EF.
+        crosses_fermi = np.any(
+            (np.min(self.band_energies, axis=0) <= self.fermi_energy) &
+            (np.max(self.band_energies, axis=0) >= self.fermi_energy)
+        )
+        band_gap = 0.0 if crosses_fermi else cbm - vbm
         print(f"带隙: {band_gap:.6f} eV")
 
         # 智能选择能量窗口 - 新的逻辑
@@ -430,6 +259,8 @@ class FPLOFermiVisualizer:
         print(f"\n=== 设置用户费米窗口 ===")
         print(f"费米窗口大小: ±{window_size/2:.1f} eV (总共 {window_size:.1f} eV)")
 
+        if not np.isfinite(window_size) or window_size <= 0:
+            raise ValueError("Fermi window size must be finite and positive")
         self.user_fermi_window = window_size
 
         # 重新计算能量窗口
@@ -515,6 +346,7 @@ class FPLOFermiVisualizer:
 
         # 计算每个能量点的能带密度
         for i, energy in enumerate(energy_grid):
+            check_cancelled(self)
             # 统计在该能量附近的能带数量
             nearby_energies = all_energies[np.abs(all_energies - energy) <= energy_step/2]
             density[i] = len(nearby_energies)
@@ -533,11 +365,13 @@ class FPLOFermiVisualizer:
         print("计算轨道权重密度...")
 
         for i, energy in enumerate(energy_grid):
+            check_cancelled(self)
             total_weight = 0
             count = 0
 
             # 遍历所有k点和能带
             for k_idx in range(self.num_kpoints):
+                check_cancelled(self)
                 for band_idx in range(self.num_bands):
                     band_energy = self.band_energies[k_idx, band_idx]
                     if abs(band_energy - energy) <= energy_step:
@@ -623,7 +457,7 @@ class FPLOFermiVisualizer:
             search_range_half = 10.0  # 搜索范围: ±10 eV
 
         # 转换为索引
-        energy_step = energy_grid[1] - energy_grid[0]
+        energy_step = energy_grid[1] - energy_grid[0] if len(energy_grid) > 1 else 0.1
         base_idx_half = int(base_window_half / energy_step)
         search_idx_half = int(search_range_half / energy_step)
 
@@ -652,6 +486,7 @@ class FPLOFermiVisualizer:
 
     def _find_smart_upper_boundary(self, energy_grid, scores, fermi_idx, base_idx_half, search_idx_half, material_type, cbm, band_gap):
         """智能寻找上边界"""
+        energy_step = energy_grid[1] - energy_grid[0] if len(energy_grid) > 1 else 0.1
         # 确定搜索起始位置
         if material_type != "metal" and band_gap > 0.1:
             # 对于半导体/绝缘体，从导带底上方开始搜索
@@ -659,18 +494,18 @@ class FPLOFermiVisualizer:
             start_idx = np.argmin(np.abs(energy_grid - start_energy))
         else:
             # 对于金属，从费米面上方开始搜索
-            start_idx = fermi_idx + int(1.0 / (energy_grid[1] - energy_grid[0]))
+            start_idx = fermi_idx + int(1.0 / energy_step)
 
         # 搜索范围
         end_idx = min(len(energy_grid) - 1, fermi_idx + search_idx_half)
 
         # 寻找评分较低的区域作为边界 (评分低意味着不重要)
-        best_boundary_idx = fermi_idx + base_idx_half
+        best_boundary_idx = min(len(energy_grid) - 1, fermi_idx + base_idx_half)
         min_score = float('inf')
 
         for idx in range(max(start_idx, fermi_idx + base_idx_half // 2), end_idx):
             # 计算局部平均评分 (1 eV窗口)
-            window_half = int(0.5 / (energy_grid[1] - energy_grid[0]))
+            window_half = int(0.5 / energy_step)
             window_start = max(0, idx - window_half)
             window_end = min(len(scores), idx + window_half)
             local_score = np.mean(scores[window_start:window_end])
@@ -690,6 +525,7 @@ class FPLOFermiVisualizer:
 
     def _find_smart_lower_boundary(self, energy_grid, scores, fermi_idx, base_idx_half, search_idx_half, material_type, vbm, band_gap):
         """智能寻找下边界"""
+        energy_step = energy_grid[1] - energy_grid[0] if len(energy_grid) > 1 else 0.1
         # 确定搜索起始位置
         if material_type != "metal" and band_gap > 0.1:
             # 对于半导体/绝缘体，从价带顶下方开始搜索
@@ -697,18 +533,18 @@ class FPLOFermiVisualizer:
             start_idx = np.argmin(np.abs(energy_grid - start_energy))
         else:
             # 对于金属，从费米面下方开始搜索
-            start_idx = fermi_idx - int(1.0 / (energy_grid[1] - energy_grid[0]))
+            start_idx = fermi_idx - int(1.0 / energy_step)
 
         # 搜索范围
         end_idx = max(0, fermi_idx - search_idx_half)
 
         # 寻找评分较低的区域作为边界
-        best_boundary_idx = fermi_idx - base_idx_half
+        best_boundary_idx = max(0, fermi_idx - base_idx_half)
         min_score = float('inf')
 
         for idx in range(min(start_idx, fermi_idx - base_idx_half // 2), end_idx, -1):
             # 计算局部平均评分 (1 eV窗口)
-            window_half = int(0.5 / (energy_grid[1] - energy_grid[0]))
+            window_half = int(0.5 / energy_step)
             window_start = max(0, idx - window_half)
             window_end = min(len(scores), idx + window_half)
             local_score = np.mean(scores[window_start:window_end])
@@ -819,25 +655,8 @@ class FPLOFermiVisualizer:
         return optimal_lower
         
     def _identify_important_bands(self):
-        """识别费米面附近的重要能带"""
-        print("\n=== 识别重要能带 ===")
-        
-        # 选择在能量窗口内的所有能带
-        selected_bands = []
-        
-        for band_idx in range(self.num_bands):
-            band_energies = self.band_energies[:, band_idx]
-            
-            # 检查能带是否在能量窗口内
-            in_window = np.any((band_energies >= self.energy_window[0]) & 
-                              (band_energies <= self.energy_window[1]))
-            
-            if in_window:
-                selected_bands.append(band_idx)
-        
-        self.important_bands = sorted(selected_bands)
-        print(f"总计识别到 {len(self.important_bands)} 条重要能带（在能量窗口内）")
-        
+        """Select every band intersecting the energy window, including crossings."""
+        self.important_bands = bands_in_window(self.band_energies, self.energy_window)
         return self.important_bands
 
     def create_output_folder(self):
@@ -884,38 +703,17 @@ class FPLOFermiVisualizer:
             return k_points, energies, weights
 
     def _plot_orbital_weight_points(self, ax, k_points, energies, weights, color, min_weight=0.005, plot_settings=None):
-        """绘制轨道权重散点图"""
-        if len(k_points) < 2:
-            return
+        """Use the same raw-weight scale as the complete view, without interpolation."""
+        settings = plot_settings or {}
+        k, energy, weight = prepare_weight_points(
+            k_points, energies, weights, min_weight, getattr(self, 'plot_max_kpoints', None))
+        if len(weight):
+            add_weight_scale(ax, settings)
+            sizes = weight_point_sizes(weight, settings.get('point_min_size', 2),
+                                       settings.get('point_max_size', 50), settings.get('point_size_factor', 1.0))
+            return ax.scatter(k, energy, s=sizes, c=color,
+                              alpha=settings.get('point_alpha', 0.7), edgecolors='none', zorder=2)
 
-        # 过滤掉权重过小的点
-        significant_mask = weights > min_weight
-        if not np.any(significant_mask):
-            return
-
-        k_significant = k_points[significant_mask]
-        e_significant = energies[significant_mask]
-        w_significant = weights[significant_mask]
-
-        # 计算点的大小
-        base_size = 8
-        max_size = 120
-        w_max = np.max(w_significant) if len(w_significant) > 0 else 1.0
-        if w_max > 0:
-            w_normalized = w_significant / w_max
-            point_sizes = base_size + w_normalized * (max_size - base_size)
-        else:
-            point_sizes = np.ones_like(w_significant) * base_size
-
-        # 绘制散点
-        scatter = ax.scatter(k_significant, e_significant,
-                           s=point_sizes,
-                           c=color,
-                           alpha=0.8,
-                           edgecolors='none',
-                           zorder=3)
-
-        return scatter
 
     def _find_continuous_segments(self, k_points, max_gap=0.05):
         """找到k点的连续段"""
@@ -1173,7 +971,7 @@ class FPLOFermiVisualizer:
         if figsize is None:
             figsize = self._calculate_dynamic_figsize(self.energy_window, base_width=12, base_height=9)
 
-        elements = sorted(self.elements)
+        elements = sorted({key.split('_', 1)[0] for key in self.orbital_info})
         orbital_types = sorted(self.orbital_types)
 
         figure_count = 3

@@ -164,3 +164,4 @@ performance_*.txt
 .venv/
 .last_version
 
+.test-artifacts/

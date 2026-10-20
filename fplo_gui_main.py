@@ -66,6 +66,8 @@ except Exception as e:
     print(f"matplotlib字体配置失败: {e}")
 
 import numpy as np
+from orbital_data import grouped_weights, prepare_weight_points, weight_point_sizes
+from weight_plot import add_weight_scale
 import re
 import colorsys
 from matplotlib.patches import Rectangle
@@ -81,6 +83,7 @@ from performance_monitor import PerformanceMonitor
 # 引入拆分后的模块
 from gui.tools import MultiCoreProcessor, DataLoaderThread, process_single_orbital
 from gui.log_widget import LogWidget
+from gui.loading import BackgroundLoader
 
 # ============================================================================
 # 2. 工具类模块（已迁移）
@@ -98,15 +101,29 @@ from gui.log_widget import LogWidget
 
 class InteractivePlotWidget(QWidget):
     """增强的交互式绘图组件"""
+    loading_status = pyqtSignal(str)
+    loading_changed = pyqtSignal()
+    loading_idle = pyqtSignal()
 
     def __init__(self):
         super().__init__()
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.timeout.connect(self.plot_current_view)
+        self._fermi_loader = BackgroundLoader(self)
+        self._fermi_loader.result.connect(self._fermi_loaded)
+        self._fermi_loader.error.connect(self._fermi_failed)
+        self._fermi_loader.status.connect(self.loading_status)
+        self._fermi_loader.busy_changed.connect(self.loading_changed)
+        self._fermi_loader.idle.connect(self._loading_finished)
+        self._fermi_requested_file = None
+        self._close_pending = False
         self.visualizer = None
         self.current_plot_type = "complete"  # complete, fermi, individual
         self.visible_orbitals = {}
         self.visible_elements = {}
 
-        # 初始化多核处理器（已删除缓存机制，采用全量重绘）
+        # 保留旧工具接口；权重绘制使用分组缓存，不创建进程池
         self.multicore_processor = MultiCoreProcessor()
 
         # 框选放大相关
@@ -175,7 +192,6 @@ class InteractivePlotWidget(QWidget):
             # 性能设置
             'max_points_per_orbital': 500,  # 每个轨道最大点数（降低）
             'use_fast_rendering': True,     # 使用快速渲染
-            'use_multiprocessing': True,    # 使用多核处理
 
             # 学术标准颜色方案
             'color_scheme': 'academic'  # academic, colorful, monochrome
@@ -223,6 +239,7 @@ class InteractivePlotWidget(QWidget):
             self.canvas.mpl_connect('button_press_event', self.on_mouse_press)
             self.canvas.mpl_connect('button_release_event', self.on_mouse_release)
             self.canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
+            self.canvas.mpl_connect('draw_event', self._on_viewport_drawn)
             print("matplotlib事件连接完成")
         except Exception as e:
             print(f"matplotlib事件连接失败: {e}")
@@ -233,14 +250,20 @@ class InteractivePlotWidget(QWidget):
         """设置可视化器 - 支持双可视化器系统"""
         print(f"设置可视化器，文件: {filename}")
 
+        self._fermi_loader.cancel()
+        self._fermi_requested_file = None
         # 保存文件名用于后续切换
         if filename:
             self.current_filename = filename
 
         # 默认设置为完整能带可视化器
+        self.fermi_visualizer = None
+        self.visible_orbitals.clear()
         self.complete_visualizer = visualizer
         self.visualizer = visualizer
         self.current_plot_type = "complete"
+        self.is_zoomed = False
+        self.current_xlim = self.current_ylim = None
 
         print("默认使用完整能带模式")
 
@@ -462,6 +485,7 @@ class InteractivePlotWidget(QWidget):
 
     def plot_current_view(self):
         """根据当前视图模式绘制 - 简化版本"""
+        self._redraw_timer.stop()
         current_mode = getattr(self, 'current_plot_type', 'complete')
         log_debug(f"绘制视图: {current_mode}")
 
@@ -475,6 +499,8 @@ class InteractivePlotWidget(QWidget):
         if self.is_zoomed and hasattr(self.figure, 'axes') and self.figure.axes:
             ax = self.figure.axes[0]
             saved_xlim, saved_ylim = ax.get_xlim(), ax.get_ylim()
+        self._weight_k_range = saved_xlim
+        self._weight_energy_range = saved_ylim
 
         # 根据模式选择绘制方法
         try:
@@ -493,22 +519,17 @@ class InteractivePlotWidget(QWidget):
             traceback.print_exc()
             return
 
-        # 恢复缩放 - 但不覆盖费米专注模式的Y轴设置
+        # 恢复视口；完整数据会在这个范围内重新生成显示散点。
         if self.is_zoomed and saved_xlim and saved_ylim:
             if hasattr(self.figure, 'axes') and self.figure.axes:
                 ax = self.figure.axes[0]
-                # 总是恢复X轴缩放
                 ax.set_xlim(saved_xlim)
-
-                # 只有在非费米专注模式下才恢复Y轴缩放
-                if current_mode != "fermi":
-                    ax.set_ylim(saved_ylim)
-                    print(f"恢复缩放: X={saved_xlim}, Y={saved_ylim}")
-                else:
-                    print(f"费米专注模式: 只恢复X轴缩放={saved_xlim}, 保持费米窗口Y轴设置")
+                ax.set_ylim(saved_ylim)
 
         # 强制刷新画布
         try:
+            ax = self.figure.axes[0]
+            self._rendered_limits = (ax.get_xlim(), ax.get_ylim())
             self.canvas.draw()
             self.canvas.flush_events()
             print(f"画布已强制刷新")
@@ -516,6 +537,19 @@ class InteractivePlotWidget(QWidget):
             print(f"画布刷新失败: {e}")
 
         print(f"视图 {current_mode} 绘制完成")
+
+    def _on_viewport_drawn(self, event):
+        """Toolbar zoom/pan must resample from full data as well as Shift-drag."""
+        previous = getattr(self, '_rendered_limits', None)
+        if previous is None or not self.figure.axes:
+            return
+        ax = self.figure.axes[0]
+        current = (ax.get_xlim(), ax.get_ylim())
+        if current != previous:
+            if not self.is_zoomed:
+                self.current_xlim, self.current_ylim = previous
+            self.is_zoomed = True
+            self.request_plot()
 
     def plot_complete_structure(self):
         """绘制完整能带结构 - 学术标准"""
@@ -594,7 +628,7 @@ class InteractivePlotWidget(QWidget):
         self.figure.tight_layout()
 
         # 绘制
-        self.canvas.draw()
+        # Canvas is drawn once by plot_current_view().
 
     def plot_fermi_focused(self):
         """绘制费米面专注模式 - 学术标准"""
@@ -690,7 +724,7 @@ class InteractivePlotWidget(QWidget):
         self.figure.tight_layout()
 
         # 绘制画布
-        self.canvas.draw()
+        # Canvas is drawn once by plot_current_view().
 
         log_info(f"费米专注模式绘制完成，能量范围: {y_min:.2f} ~ {y_max:.2f} eV")
 
@@ -765,235 +799,61 @@ class InteractivePlotWidget(QWidget):
         print(f"标签距离: X轴={xlabel_pad}, Y轴={ylabel_pad}")
 
     def _plot_orbital_weights(self, ax, energy_range=None):
-        """绘制轨道权重 - 性能优化版本"""
-        if not self.visualizer:
+        """Draw cached exact group sums without per-refresh worker processes."""
+        if self.visualizer is None:
             return
-
-        import time
-        start_time = time.time()
-
-        # 获取设置参数
-        weight_threshold = self.plot_settings.get('weight_threshold', 0.02)
-        point_size_factor = self.plot_settings.get('point_size_factor', 1.0)
-        point_alpha = self.plot_settings.get('point_alpha', 0.7)
-        min_point_size = self.plot_settings.get('point_min_size', 2)
-        max_point_size = self.plot_settings.get('point_max_size', 50)
-        max_points_per_orbital = self.plot_settings.get('max_points_per_orbital', 1000)
-        use_fast_rendering = self.plot_settings.get('use_fast_rendering', True)
-
-        print(f"开始绘制轨道权重，阈值: {weight_threshold}, 最大点数: {max_points_per_orbital}")
-
-        # 检查是否启用多核处理
-        use_multiprocessing = self.plot_settings.get('use_multiprocessing', True)
-
-        total_orbitals = len(self.visualizer.orbital_info)
-        print(f"总轨道数: {total_orbitals}, 多核处理: {use_multiprocessing}")
-
-        if use_multiprocessing and total_orbitals > 4:
-            # 使用多核处理
-            self._plot_orbital_weights_multicore(ax, energy_range, weight_threshold,
-                                               point_size_factor, point_alpha,
-                                               min_point_size, max_point_size,
-                                               max_points_per_orbital)
-        else:
-            # 使用单核处理
-            self._plot_orbital_weights_singlecore(ax, energy_range, weight_threshold,
-                                                point_size_factor, point_alpha,
-                                                min_point_size, max_point_size,
-                                                max_points_per_orbital)
+        settings = self.plot_settings
+        viewport = getattr(self, '_weight_energy_range', None)
+        if viewport is not None:
+            energy_range = viewport if energy_range is None else (
+                max(viewport[0], energy_range[0]), min(viewport[1], energy_range[1]))
+        self._plot_orbital_weights_singlecore(
+            ax, energy_range, settings.get('weight_threshold', 0.02),
+            settings.get('point_size_factor', 1.0), settings.get('point_alpha', 0.7),
+            settings.get('point_min_size', 2), settings.get('point_max_size', 50),
+            settings.get('max_points_per_orbital', 1000),
+        )
 
     def _plot_orbital_weights_multicore(self, ax, energy_range, weight_threshold,
                                       point_size_factor, point_alpha, min_point_size,
                                       max_point_size, max_points_per_orbital):
-        """多核绘制轨道权重"""
-        print("使用多核处理绘制轨道权重...")
-
-        # 准备轨道数据列表
-        orbital_data_list = []
-        for orbital_key, indices in self.visualizer.orbital_info.items():
-            # 检查轨道可见性
-            if not self.visible_orbitals.get(orbital_key, True):
-                continue
-
-            if not indices or len(indices) == 0:
-                continue
-
-            # 为每个能带准备数据
-            for band_idx in range(self.visualizer.num_bands):
-                band_energies = self.visualizer.band_energies[:, band_idx]
-
-                # 能量范围过滤
-                if energy_range:
-                    if np.max(band_energies) < energy_range[0] or np.min(band_energies) > energy_range[1]:
-                        continue
-
-                # 计算轨道权重
-                try:
-                    max_weight_index = self.visualizer.band_weights.shape[2] - 1
-                    valid_indices = [idx for idx in indices if 0 <= idx <= max_weight_index]
-
-                    if not valid_indices:
-                        continue
-
-                    orbital_weights = np.sum(self.visualizer.band_weights[:, band_idx, :][:, valid_indices], axis=1)
-
-                    # 准备数据
-                    settings = {
-                        'weight_threshold': weight_threshold,
-                        'max_points_per_orbital': max_points_per_orbital,
-                        'energy_range': energy_range
-                    }
-
-                    orbital_data_list.append((
-                        f"{orbital_key}_band_{band_idx}",
-                        self.visualizer.k_points.copy(),
-                        band_energies.copy(),
-                        orbital_weights.copy(),
-                        settings
-                    ))
-
-                except (IndexError, ValueError):
-                    continue
-
-        if not orbital_data_list:
-            return
-
-        print(f"准备处理 {len(orbital_data_list)} 个轨道-能带组合")
-
-        # 多核处理
-        try:
-            processed_results = self.multicore_processor.process_orbitals_parallel(
-                orbital_data_list, process_single_orbital,
-                max_workers=min(4, len(orbital_data_list))  # 限制最大工作进程数
-            )
-
-            # 绘制结果
-            for result in processed_results:
-                if result is None:
-                    continue
-
-                orbital_key = result['orbital_key'].split('_band_')[0]
-                color = self.visualizer.orbital_colors.get(orbital_key, '#95A5A6')
-
-                k_filtered = result['k_points']
-                e_filtered = result['energies']
-                w_filtered = result['weights']
-
-                if len(k_filtered) > 0:
-                    # 计算点大小
-                    w_max = np.max(w_filtered)
-                    if w_max > 0:
-                        w_normalized = w_filtered / w_max
-                        point_sizes = (min_point_size +
-                                     w_normalized * (max_point_size - min_point_size) * point_size_factor)
-                    else:
-                        point_sizes = np.ones_like(w_filtered) * min_point_size
-
-                    # 直接绘制散点
-                    ax.scatter(k_filtered, e_filtered, s=point_sizes, c=color,
-                             alpha=point_alpha, edgecolors='none', zorder=2)
-
-            print(f"多核处理完成，绘制了 {len([r for r in processed_results if r is not None])} 个轨道")
-
-        except Exception as e:
-            print(f"多核处理失败，回退到单核: {e}")
-            self._plot_orbital_weights_singlecore(ax, energy_range, weight_threshold,
-                                                point_size_factor, point_alpha,
-                                                min_point_size, max_point_size,
-                                                max_points_per_orbital)
+        """Compatibility entry point using the same deterministic vectorized path."""
+        self._plot_orbital_weights_singlecore(
+            ax, energy_range, weight_threshold, point_size_factor, point_alpha,
+            min_point_size, max_point_size, max_points_per_orbital,
+        )
 
     def _plot_orbital_weights_singlecore(self, ax, energy_range, weight_threshold,
                                        point_size_factor, point_alpha, min_point_size,
                                        max_point_size, max_points_per_orbital):
-        """单核绘制轨道权重（原有逻辑）"""
-        print("使用单核处理绘制轨道权重...")
-
-        total_orbitals = len(self.visualizer.orbital_info)
-        processed_orbitals = 0
-
-        # 遍历所有轨道
+        """Filter full data to the viewport, then sample using one shared scale."""
+        display_limit = getattr(self.visualizer, 'plot_max_kpoints', None)
+        if display_limit is not None:
+            max_points_per_orbital = min(max_points_per_orbital, display_limit)
         for orbital_key, indices in self.visualizer.orbital_info.items():
-            processed_orbitals += 1
-            if processed_orbitals % 5 == 0:
-                print(f"处理进度: {processed_orbitals}/{total_orbitals} 轨道")
-            # 检查轨道可见性
-            if not self.visible_orbitals.get(orbital_key, True):
+            if not indices or not self.visible_orbitals.get(orbital_key, True):
                 continue
-
-            # 检查indices是否有效
-            if not indices or len(indices) == 0:
-                continue
-
-
-
-            # 获取轨道颜色
-            color = self.visualizer.orbital_colors.get(orbital_key, '#95A5A6')
-
-            # 调试信息
-            if hasattr(self, '_debug_mode') and self._debug_mode:
-                print(f"绘制轨道: {orbital_key}, 权重索引: {indices}, 颜色: {color}")
-
-            # 遍历所有能带
+            weights = grouped_weights(self.visualizer, orbital_key)
+            points, energies, sizes = [], [], []
             for band_idx in range(self.visualizer.num_bands):
-                band_energies = self.visualizer.band_energies[:, band_idx]
-
-                # 如果指定了能量范围，检查该能带是否在范围内
-                if energy_range:
-                    if np.max(band_energies) < energy_range[0] or np.min(band_energies) > energy_range[1]:
-                        continue
-
-                # 计算轨道权重 - 确保索引正确
-                try:
-                    # 检查索引是否在有效范围内
-                    max_weight_index = self.visualizer.band_weights.shape[2] - 1
-                    valid_indices = [idx for idx in indices if 0 <= idx <= max_weight_index]
-
-                    if not valid_indices:
-                        continue
-
-                    # 计算该轨道的总权重
-                    orbital_weights = np.sum(self.visualizer.band_weights[:, band_idx, :][:, valid_indices], axis=1)
-
-                except (IndexError, ValueError) as e:
-                    print(f"警告: 轨道 {orbital_key} 权重计算失败: {e}")
+                k, energy, weight = prepare_weight_points(
+                    self.visualizer.k_points,
+                    self.visualizer.band_energies[:, band_idx], weights[:, band_idx],
+                    weight_threshold, max_points_per_orbital, energy_range,
+                    getattr(self, '_weight_k_range', None),
+                )
+                if not len(weight):
                     continue
-
-                # 过滤显著权重
-                mask = orbital_weights > weight_threshold
-                if np.any(mask):
-                    k_filtered = self.visualizer.k_points[mask]
-                    e_filtered = band_energies[mask]
-                    w_filtered = orbital_weights[mask]
-
-                    # 如果指定了能量范围，进一步过滤
-                    if energy_range:
-                        range_mask = (e_filtered >= energy_range[0]) & (e_filtered <= energy_range[1])
-                        k_filtered = k_filtered[range_mask]
-                        e_filtered = e_filtered[range_mask]
-                        w_filtered = w_filtered[range_mask]
-
-                    if len(k_filtered) > 0:
-                        # 数据采样以提高性能
-                        if len(k_filtered) > max_points_per_orbital:
-                            # 智能采样：保留权重最大的点
-                            sample_indices = np.argsort(w_filtered)[-max_points_per_orbital:]
-                            k_filtered = k_filtered[sample_indices]
-                            e_filtered = e_filtered[sample_indices]
-                            w_filtered = w_filtered[sample_indices]
-
-                        # 计算点大小 - 使用更精确的缩放
-                        w_max = np.max(w_filtered)
-                        if w_max > 0:
-                            w_normalized = w_filtered / w_max
-                            point_sizes = (min_point_size +
-                                         w_normalized * (max_point_size - min_point_size) * point_size_factor)
-                        else:
-                            point_sizes = np.ones_like(w_filtered) * min_point_size
-
-                        # 直接绘制散点
-                        print(f"完整能带模式绘制数据点数: {len(k_filtered)}")
-                        ax.scatter(k_filtered, e_filtered, s=point_sizes, c=color,
-                                 alpha=point_alpha, edgecolors='none', zorder=2)
+                point_sizes = weight_point_sizes(weight, min_point_size,
+                                                  max_point_size, point_size_factor)
+                points.append(k)
+                energies.append(energy)
+                sizes.append(point_sizes)
+            if points:
+                ax.scatter(np.concatenate(points), np.concatenate(energies),
+                           s=np.concatenate(sizes),
+                           c=self.visualizer.orbital_colors.get(orbital_key, '#95A5A6'),
+                           alpha=point_alpha, edgecolors='none', zorder=2)
 
     # 删除了插值相关的绘制方法
 
@@ -1067,6 +927,15 @@ class InteractivePlotWidget(QWidget):
         """添加学术标准图例"""
         # 创建图例元素
         legend_elements = []
+        add_weight_scale(ax, self.plot_settings)
+        limit = self.plot_settings.get('max_points_per_orbital', 1000)
+        source_limit = getattr(self.visualizer, 'plot_max_kpoints', None)
+        if source_limit is not None:
+            limit = min(limit, source_limit)
+        ax.text(.99, .01, f'Full k points: {len(self.visualizer.k_points)} | '
+                f'Display limit: {limit}/band/orbital in view', transform=ax.transAxes,
+                ha='right', va='bottom', fontsize=7,
+                bbox=dict(facecolor='white', alpha=.85, edgecolor='none'))
 
         # 按元素分组显示轨道
         elements = set()
@@ -1178,7 +1047,7 @@ class InteractivePlotWidget(QWidget):
             # 更新图例设置
             if isinstance(visible, dict):
                 self.legend_settings.update(visible)
-                self.plot_current_view()
+                self.request_plot()
                 print("图例设置已更新")
             return
         elif orbital_key == "FONT_SIZE_CHANGED":
@@ -1188,7 +1057,7 @@ class InteractivePlotWidget(QWidget):
 
         # 轨道可见性设置 - 全局生效
         self.visible_orbitals[orbital_key] = visible
-        self.plot_current_view()
+        self.request_plot()
 
 
 
@@ -1201,6 +1070,8 @@ class InteractivePlotWidget(QWidget):
             return
 
         old_mode = getattr(self, 'current_plot_type', 'unknown')
+        if mode != old_mode:
+            self.is_zoomed = False
         self.current_plot_type = mode
         print(f"视图模式从 {old_mode} 切换到 {mode}")
 
@@ -1212,6 +1083,8 @@ class InteractivePlotWidget(QWidget):
 
     def _switch_to_complete_visualizer(self):
         """切换到完整能带可视化器"""
+        self._fermi_loader.cancel()
+        self._fermi_requested_file = None
         print("切换到完整能带可视化器 (fplo_visualizer.py)")
 
         # 如果已经是完整能带模式且可视化器存在，直接绘制
@@ -1272,42 +1145,78 @@ class InteractivePlotWidget(QWidget):
             print(f"创建完整能带可视化器失败: {e}")
 
     def _create_fermi_visualizer(self, filename):
-        """创建费米专注可视化器"""
+        """Start the first Fermi read/analysis without blocking the Qt event loop."""
+        if self._fermi_loader.busy and self._fermi_requested_file == filename:
+            return
+        self._fermi_requested_file = filename
+        self._fermi_loader.request(filename, 'fermi')
+
+    def _fermi_loaded(self, visualizer):
+        if self.current_plot_type != 'fermi' or visualizer.filename != self.current_filename:
+            return
+        window = self.plot_settings['fermi_window']
         try:
-            from fplo_fermi_visualizer import FPLOFermiVisualizer
-            print("正在创建费米专注可视化器...")
+            visualizer.set_fermi_window(window[1] - window[0])
+        except ValueError as exc:
+            self._fermi_failed(str(exc))
+            return
+        visualizer._setup_matplotlib()
+        visualizer.plot_settings = self.plot_settings
+        self.fermi_visualizer = visualizer
+        self.visualizer = visualizer
+        self._assign_colors()
+        self.plot_current_view()
+        if hasattr(self, 'control_panel_ref') and self.control_panel_ref:
+            self.control_panel_ref.set_orbitals(visualizer)
+        self.loading_status.emit('费米区域数据已就绪')
 
-            self.fermi_visualizer = FPLOFermiVisualizer(filename)
+    def _fermi_failed(self, message):
+        self.fermi_visualizer = None
+        self.cancel_fermi_load()
+        log_error(f'费米区域分析失败: {message}')
+        self.loading_status.emit(f'费米区域分析失败: {message}')
 
-            # 传递plot_settings到费米可视化器
-            self.fermi_visualizer.plot_settings = self.plot_settings
-            print("传递plot_settings到费米可视化器")
+    def cancel_fermi_load(self):
+        self._fermi_loader.cancel()
+        self._fermi_requested_file = None
+        if self.current_plot_type == 'fermi':
+            self.current_plot_type = 'complete'
+            self.visualizer = getattr(self, 'complete_visualizer', None)
+            if hasattr(self, 'control_panel_ref'):
+                self.control_panel_ref.set_view_mode_programmatically('complete')
+                self.control_panel_ref.update_fermi_band_controls('complete')
+            self.request_plot()
 
-            # 应用控制面板的费米窗口设置
-            if hasattr(self, 'control_panel_ref') and self.control_panel_ref:
-                fermi_window = self.control_panel_ref.plot_settings.get('fermi_window', [-5.0, 5.0])
-                window_size = fermi_window[1] - fermi_window[0]
-                print(f"应用控制面板费米窗口设置: {fermi_window} (总窗口: {window_size:.1f} eV)")
+    def begin_file_change(self):
+        self.cancel_fermi_load()
+        self._redraw_timer.stop()
+        self.current_filename = None
+        self.visualizer = None
+        self.complete_visualizer = None
+        self.fermi_visualizer = None
+        self.visible_orbitals.clear()
 
-                # 设置费米可视化器的窗口
-                self.fermi_visualizer.set_fermi_window(window_size)
+    def shutdown_loading(self):
+        self._redraw_timer.stop()
+        self._fermi_loader.shutdown()
 
-            self.visualizer = self.fermi_visualizer
+    def _loading_finished(self):
+        self.loading_idle.emit()
+        if self._close_pending:
+            self.close()
 
-            print("费米专注可视化器创建成功")
-            self.plot_current_view()
+    def closeEvent(self, event):
+        self.shutdown_loading()
+        if self._fermi_loader.busy:
+            self._close_pending = True
+            event.ignore()
+        else:
+            event.accept()
 
-            # 通知控制面板更新轨道信息
-            if hasattr(self, 'control_panel_ref') and self.control_panel_ref:
-                self.control_panel_ref.set_orbitals(self.fermi_visualizer)
-
-        except Exception as e:
-            print(f"创建费米专注可视化器失败: {e}")
-            import traceback
-            traceback.print_exc()
-            # 如果费米可视化器创建失败，回退到完整能带
-            print("回退到完整能带可视化器")
-            self._switch_to_complete_visualizer()
+    def request_plot(self):
+        """Coalesce bursts of UI signals into one render on the next event turn."""
+        if not self._redraw_timer.isActive():
+            self._redraw_timer.start(0)
 
     def update_plot_settings(self, settings):
         """更新绘图设置 - 全局生效于所有视图模式"""
@@ -1329,8 +1238,8 @@ class InteractivePlotWidget(QWidget):
                 self.control_panel_ref.update_orbital_checkboxes_style(
                     self.control_panel_ref.font_size)
 
-        # 立即重绘当前视图
-        self.plot_current_view()
+        # 合并同一轮事件中的设置变化后重绘
+        self.request_plot()
 
     def on_mouse_press(self, event):
         """鼠标按下事件"""
@@ -1701,7 +1610,7 @@ class ControlPanel(QWidget):
         orbital_layout.addWidget(self.point_alpha_label, 2, 2)
 
         # 最小点大小 - 按照能带设置格式
-        orbital_layout.addWidget(QLabel("最小点大小:"), 3, 0)
+        orbital_layout.addWidget(QLabel("零权重点面积:"), 3, 0)
         self.min_point_size_spin = QSpinBox()
         self.min_point_size_spin.setRange(1, 20)
         self.min_point_size_spin.setValue(3)
@@ -1709,7 +1618,7 @@ class ControlPanel(QWidget):
         orbital_layout.addWidget(self.min_point_size_spin, 3, 1, 1, 2)
 
         # 最大点大小 - 按照能带设置格式
-        orbital_layout.addWidget(QLabel("最大点大小:"), 4, 0)
+        orbital_layout.addWidget(QLabel("单位权重点面积:"), 4, 0)
         self.max_point_size_spin = QSpinBox()
         self.max_point_size_spin.setRange(20, 200)
         self.max_point_size_spin.setValue(80)
@@ -1740,23 +1649,19 @@ class ControlPanel(QWidget):
         right_layout.setColumnStretch(0, 2)  # 标签列
         right_layout.setColumnStretch(1, 3)  # 控件列
 
-        # 多核处理 - 参照费米线样式
-        right_layout.addWidget(QLabel("多核处理:"), 0, 0)
-        self.use_multiprocessing = QCheckBox()
-        self.use_multiprocessing.setChecked(True)
-        self.use_multiprocessing.setToolTip(f"使用多核处理加速绘图 (检测到{multiprocessing.cpu_count()}核)")
-        self.use_multiprocessing.toggled.connect(self.on_orbital_settings_changed)
-        right_layout.addWidget(self.use_multiprocessing, 0, 1)
+        # 权重使用 NumPy 分组缓存，避免每次重绘创建进程池
+        right_layout.addWidget(QLabel("权重处理:"), 0, 0)
+        right_layout.addWidget(QLabel("分组缓存"), 0, 1)
 
-        # [Deprecated 20250827] 旧逻辑：缓存机制（cache_enabled 复选框）UI 已移除，采用全量重绘
+        # 分组数值缓存自动管理，不需要用户手动清理
         # 最大点数/轨道 - 参照费米线样式
-        right_layout.addWidget(QLabel("最大点数/轨道:"), 2, 0)
+        right_layout.addWidget(QLabel("显示点数/轨道能带:"), 2, 0)
         self.max_points_spin = QSpinBox()
         self.max_points_spin.setRange(100, 5000)
         self.max_points_spin.setValue(500)
         self.max_points_spin.setSingleStep(100)
         self.max_points_spin.setMaximumWidth(100)  # 参照费米线区域的输入框宽度
-        self.max_points_spin.setToolTip("每个轨道最大绘制点数，越少越快")
+        self.max_points_spin.setToolTip("仅限制每条能带当前视口内的权重散点；完整数据保留，放大后重新取点。")
         self.max_points_spin.valueChanged.connect(self.on_orbital_settings_changed)
         right_layout.addWidget(self.max_points_spin, 2, 1)
 
@@ -2369,7 +2274,9 @@ class ControlPanel(QWidget):
         """)
 
         # 设置工具提示
-        checkbox.setToolTip(f"轨道: {orbital_key}\\n权重数量: {weight_count}\\n颜色: {color}")
+        columns = getattr(self.visualizer, 'orbital_columns', [])
+        labels = [columns[index]['label'] for index in weight_indices if index < len(columns)]
+        checkbox.setToolTip(f"原子壳层: {orbital_key}\n分量数量: {weight_count}\n" + '\n'.join(labels))
 
         # 连接信号
         checkbox.toggled.connect(lambda checked, key=orbital_key:
@@ -2751,7 +2658,6 @@ class ControlPanel(QWidget):
             'point_max_size': self.max_point_size_spin.value(),
             'weight_threshold': self.weight_threshold_spin.value(),
             'max_points_per_orbital': self.max_points_spin.value(),
-            'use_multiprocessing': self.use_multiprocessing.isChecked(),
         }
         self.settings_changed.emit(settings)
 

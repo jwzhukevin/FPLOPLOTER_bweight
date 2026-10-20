@@ -10,7 +10,7 @@ InteractivePlotWidget，而 fplo_gui_main 不在模块顶层导入 MainWindow，
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QSplitter, QFileDialog,
-    QMessageBox, QProgressBar
+    QMessageBox, QProgressBar, QPushButton
 )
 from PyQt5.QtCore import Qt
 
@@ -21,7 +21,7 @@ from log_manager import (
 
 # 来自项目内模块
 from gui.log_widget import LogWidget
-from gui.tools import DataLoaderThread
+from gui.loading import BackgroundLoader
 # 注意：以下从主文件导入，需确保主文件不在顶层导入 MainWindow
 from fplo_gui_main import ControlPanel, InteractivePlotWidget
 
@@ -44,7 +44,17 @@ class MainWindow(QMainWindow):
         # 记录程序启动
         log_status("FPLO可视化工具主窗口初始化")
 
+        self._closing = False
+        self._load_controller = BackgroundLoader(self)
         self.init_ui()
+        self._load_controller.result.connect(self.on_data_loaded)
+        self._load_controller.error.connect(self.on_load_error)
+        self._load_controller.status.connect(self._show_loading_status)
+        self._load_controller.busy_changed.connect(self._update_loading_state)
+        self._load_controller.idle.connect(self._finish_close)
+        self.plot_widget.loading_status.connect(self._show_loading_status)
+        self.plot_widget.loading_changed.connect(self._update_loading_state)
+        self.plot_widget.loading_idle.connect(self._finish_close)
 
     def set_window_icon(self):
         """设置窗口图标"""
@@ -163,6 +173,10 @@ class MainWindow(QMainWindow):
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.statusBar().addPermanentWidget(self.progress_bar)
+        self.cancel_load_button = QPushButton('取消加载')
+        self.cancel_load_button.setVisible(False)
+        self.cancel_load_button.clicked.connect(self.cancel_background_tasks)
+        self.statusBar().addPermanentWidget(self.cancel_load_button)
 
         self.log_widget.log_info("程序启动完成")
 
@@ -326,21 +340,44 @@ class MainWindow(QMainWindow):
         if filename:
             log_user_action("选择文件", filename)
             log_info(f"开始加载文件: {filename}")
-            self.current_filename = filename
-            self.progress_bar.setVisible(True)
-            self.progress_bar.setValue(0)
-            self.loader_thread = DataLoaderThread(filename)
-            self.loader_thread.progress.connect(self.progress_bar.setValue)
-            self.loader_thread.status.connect(lambda msg: log_info(msg))
-            self.loader_thread.finished.connect(self.on_data_loaded)
-            self.loader_thread.error.connect(self.on_load_error)
-            self.loader_thread.start()
+            self.load_file(filename)
         else:
             log_user_action("取消文件选择")
 
+    def load_file(self, filename):
+        if self._closing:
+            return
+        self.plot_widget.begin_file_change()
+        self.current_filename = filename
+        self.control_panel.setEnabled(False)
+        self._load_controller.request(filename, 'complete')
+
+    def cancel_background_tasks(self):
+        self._load_controller.cancel()
+        self.plot_widget.cancel_fermi_load()
+        self.control_panel.setEnabled(True)
+        self.statusBar().showMessage('已取消加载')
+
+    def _show_loading_status(self, message):
+        if not self._closing:
+            self.statusBar().showMessage(message)
+
+    def _update_loading_state(self):
+        busy = self._load_controller.busy or self.plot_widget._fermi_loader.busy
+        self.progress_bar.setRange(0, 0)
+        self.progress_bar.setVisible(busy)
+        self.cancel_load_button.setVisible(busy and not self._closing)
+
+    def _finish_close(self):
+        if self._closing and not self._load_controller.busy and not self.plot_widget._fermi_loader.busy:
+            self.close()
+
     def on_data_loaded(self, visualizer):
         """数据加载完成"""
-        self.progress_bar.setVisible(False)
+        if self._closing or visualizer.filename != self.current_filename:
+            return
+        visualizer._setup_matplotlib()
+        self.control_panel.setEnabled(True)
         elements = sorted(visualizer.elements)
         orbital_types = sorted(visualizer.orbital_types)
         logger.set_system_info(self.current_filename, elements)
@@ -359,7 +396,9 @@ class MainWindow(QMainWindow):
 
     def on_load_error(self, error_msg):
         """数据加载错误"""
-        self.progress_bar.setVisible(False)
+        if self._closing:
+            return
+        self.control_panel.setEnabled(True)
         log_error(f"文件加载失败: {error_msg}")
         QMessageBox.critical(self, "错误", f"文件加载失败:\n{error_msg}")
 
@@ -374,6 +413,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         """程序关闭事件 - 保存日志并关闭子进程"""
+        self._closing = True
+        self.setEnabled(False)
+        self._load_controller.shutdown()
+        self.plot_widget.shutdown_loading()
+        if self._load_controller.busy or self.plot_widget._fermi_loader.busy:
+            self.statusBar().showMessage('正在取消后台任务，完成后关闭…')
+            event.ignore()
+            return
         import subprocess
         log_status("程序正在关闭...")
         log_user_action("关闭程序")
@@ -450,7 +497,7 @@ class MainWindow(QMainWindow):
         <p>• <b>单色模式</b>: 灰度显示</p>
         <h3>性能优化</h3>
         <p>• 调整最大点数限制</p>
-        <p>• 启用多核处理和缓存机制</p>
+        <p>• 权重分组自动缓存，减少重复计算</p>
         <p>• 使用权重阈值过滤数据</p>
         """
         msg = QMessageBox(self)
